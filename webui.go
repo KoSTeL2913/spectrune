@@ -172,6 +172,7 @@ func runGUI() {
 	defer w.Destroy()
 
 	bindAPI(w)
+	go checkForUpdateOnLaunch()
 
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
