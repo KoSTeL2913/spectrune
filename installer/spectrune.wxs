@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Spectrune installer — built with wixl (msitools), the Linux-hosted
+  WiX-compatible MSI compiler, same cross-build story as the Go binary
+  itself (GOOS=windows from this same Linux machine). Output is a real
+  Windows .msi; nothing here runs anywhere but Windows.
+
+  Deliberately NOT the AmneziaWG client's own installer pattern (a
+  compiled customactions.dll driving ServiceInstall/split-tunnel-driver
+  trust/etc.) — Spectrune only needs two things after files land on disk:
+  register+start its own Windows service, and drop a desktop shortcut.
+  The exe already knows how to register itself (/installservice,
+  service.go's installService — same CreateService call any installer
+  would make), so custom actions just shell out to the freshly-installed
+  exe instead of duplicating that logic in MSI-native tables.
+
+  Everything renamed to Spectrune throughout — install folder, exe name,
+  service name, ProgramData folder (see service.go/profiles.go) — this
+  install replaces the earlier "aspt-bridge" naming entirely, including
+  on-disk paths, not just user-facing text.
+
+  Releasing an UPDATE (not a fresh install): edit the two <?define?>
+  values right below — ProductVersion (bump it) and ProductCode (a fresh
+  GUID) — then rebuild with the plain command below. UpgradeCode on the
+  Product element must never change (it's what MajorUpgrade uses to
+  recognize "this is the same product, just a newer version" and silently
+  uninstall-then-install in place — no manual removal needed first).
+  Component Guids (SpectruneExeComponent, DesktopShortcutComponent) must
+  NOT change either — they identify "the same resource" release over
+  release. wixl's -D command-line overrides don't win over an in-file
+  <?define?> of the same name here (tested — the first definition wins,
+  unlike real WiX's candle.exe), so editing these two lines directly is
+  the reliable path, not passing -D on the command line.
+
+  Windows Installer only compares the first three Version fields
+  (Major.Minor.Build) for upgrade purposes — 1.0.0.0 -> 1.0.0.1 alone
+  would NOT be seen as newer, so bump at least the third field.
+  ProgramData (profiles, service.log) lives outside the MSI's file
+  tracking entirely, so it survives an upgrade untouched either way.
+
+  MUST build with: wixl -ext ui -a x64 spectrune.wxs -o spectrune.msi
+  (the ui extension flag and the x64 arch flag both matter). The x64
+  arch flag is not optional. Without it, ProgramFiles64Folder
+  resolves to "Program Files (x86)" instead of "Program Files" on this
+  64-bit target even though Win64="yes" is set on every Component;
+  that attribute only marks components as 64-bit in the MSI's own
+  tables, it does NOT steer which physical folder ProgramFiles64Folder
+  maps to — only the package's target arch does. Confirmed live
+  2026-09-06: a rebuild without -a x64 silently installed to the wrong
+  folder and repointed the already-running service's registration at
+  a path that doesn't match where the old install's files actually
+  were, breaking the service until manually uninstalled and
+  reinstalled correctly.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?define ProductCode = "F4C4A45F-B458-443D-A0E4-9BE0E20E3AFC" ?>
+  <?define ProductVersion = "1.9.1.0" ?>
+  <!--
+    Name includes the version deliberately — [ProductName] is what every
+    bundled wizard dialog's title bar and "Welcome to the ... Setup
+    Wizard"/"Ready to install ..." text actually substitutes (those
+    dialogs come from wixl's read-only ui extension, so their text can't
+    be edited directly); putting the version here is what makes it show
+    up everywhere in the wizard without forking those files. Also shows
+    up as the Add/Remove Programs display name — normal for installers
+    (browsers etc. do the same).
+  -->
+  <Product Id="$(var.ProductCode)"
+           Name="Spectrune $(var.ProductVersion)"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="Spectrune"
+           UpgradeCode="19478094-F9F8-42A8-8950-08CE0458D57B">
+
+    <Package Id="*"
+             InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="Spectrune — per-application VPN routing" />
+
+    <!--
+      Hand-rolled MajorUpgrade equivalent, not the <MajorUpgrade> shorthand
+      — its Schedule attribute isn't recognized by this wixl version
+      (silently ignored, logged as a GLib-CRITICAL at build time), so
+      RemoveExistingProducts always lands at its default early slot
+      (right after InstallValidate, before InstallInitialize). Reproduced
+      live 2026-09-03: at that early position, RemoveExistingProducts runs
+      the OLD product's own UninstallService deferred custom action before
+      a valid script context exists for it, and Windows Installer aborts
+      the whole install with error 2762 ("the action must be scheduled
+      between InstallInitialize and InstallFinalize"). Also reproduced:
+      RemoveExistingProducts refuses any arbitrary sequence position at
+      all — error 2613 ("sequenced incorrectly") — it can ONLY sit right
+      after one of a few Microsoft-blessed anchors (InstallValidate,
+      InstallInitialize, InstallExecute, InstallExecuteAgain), so
+      After="InstallFiles" alone isn't valid either; it has to be
+      After="InstallExecute" specifically (the "afterInstallExecute"
+      schedule <MajorUpgrade> would normally offer, added explicitly
+      below since wixl won't take it via that shorthand). This runs the
+      old product's removal once the new files are already staged, inside
+      a properly bracketed script — safe here specifically because
+      SpectruneExeComponent/DesktopShortcutComponent's Guids never change
+      release to release (see the release-process comment above): MSI
+      recognizes the old and new product as sharing the same components
+      by that Guid and re-points ownership rather than deleting the files
+      the new product just installed.
+    -->
+    <Upgrade Id="19478094-F9F8-42A8-8950-08CE0458D57B">
+      <UpgradeVersion Minimum="0.0.0.0" IncludeMinimum="yes"
+                       Maximum="$(var.ProductVersion)" IncludeMaximum="no"
+                       Property="WIX_UPGRADE_DETECTED" OnlyDetect="no" />
+      <UpgradeVersion Minimum="$(var.ProductVersion)" IncludeMinimum="no"
+                       OnlyDetect="yes" Property="WIX_DOWNGRADE_DETECTED" />
+    </Upgrade>
+    <!-- wixl auto-populates SecureCustomProperties from the Upgrade
+         element's Property references above — declaring it again here
+         collides with that (duplicate Property-table primary key) and
+         silently aborts the build ("libmsi_query_execute", no other
+         diagnostic — found by bisecting a minimal repro). -->
+    <Condition Message="A newer version of Spectrune is already installed.">
+      NOT WIX_DOWNGRADE_DETECTED OR Installed
+    </Condition>
+    <Media Id="1" Cabinet="spectrune.cab" EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="../assets/app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Spectrune">
+          <Component Id="SpectruneExeComponent" Guid="CD9AB35D-F615-4D22-ABA6-6A413A6F5041" Win64="yes">
+            <File Id="SpectruneExe" Name="spectrune.exe" Source="../spectrune.exe" KeyPath="yes" />
+            <!-- The Wintun adapter driver DLL — loaded at runtime via
+                 LoadLibrary from the exe's own directory
+                 (golang.zx2c4.com/wintun), so it has to ship right next
+                 to spectrune.exe. Missed on the first installer pass:
+                 every manual deploy this session copied it once early on
+                 and never touched it again, so its absence from the MSI
+                 went unnoticed until a real from-scratch install. -->
+            <File Id="WintunDll" Name="wintun.dll" Source="../wintun.dll" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="DesktopFolder" Name="Desktop">
+        <Component Id="DesktopShortcutComponent" Guid="F014359E-2E63-42E7-B70D-E92C4411A7FB" Win64="yes">
+          <Shortcut Id="SpectruneDesktopShortcut"
+                    Name="Spectrune"
+                    Description="Per-application VPN routing"
+                    Target="[#SpectruneExe]"
+                    Arguments="/gui"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon" />
+          <RegistryValue Root="HKLM"
+                          Key="Software\Spectrune"
+                          Name="DesktopShortcutInstalled"
+                          Type="integer"
+                          Value="1"
+                          KeyPath="yes" />
+        </Component>
+      </Directory>
+
+      <!-- Start Menu entry, added 2026-09-06 — before this, Spectrune
+           only showed up via its Desktop shortcut, not in the Start Menu
+           search/list at all. Own Guid (never to change release to
+           release, same rule as the other two components here), own
+           subfolder so it groups under "Spectrune" instead of dumping a
+           bare shortcut into the root Programs list. -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="SpectruneProgramMenuFolder" Name="Spectrune">
+          <Component Id="StartMenuShortcutComponent" Guid="7CB70FCE-33F3-4243-999E-03BC978F9751" Win64="yes">
+            <Shortcut Id="SpectruneStartMenuShortcut"
+                      Name="Spectrune"
+                      Description="Per-application VPN routing"
+                      Target="[#SpectruneExe]"
+                      Arguments="/gui"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="AppIcon" />
+            <RemoveFolder Id="RemoveSpectruneProgramMenuFolder" On="uninstall" />
+            <RegistryValue Root="HKLM"
+                            Key="Software\Spectrune"
+                            Name="StartMenuShortcutInstalled"
+                            Type="integer"
+                            Value="1"
+                            KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="Spectrune" Level="1">
+      <ComponentRef Id="SpectruneExeComponent" />
+      <ComponentRef Id="DesktopShortcutComponent" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+    </Feature>
+
+    <!--
+      Register the service right after its exe lands on disk (fresh
+      install or upgrade) — skipped on a plain uninstall, where REMOVE is
+      set and there's no point registering something about to be deleted.
+      Runs elevated/deferred since the MSI itself already required
+      elevation to write to Program Files and HKLM.
+    -->
+    <CustomAction Id="InstallService"
+                  FileKey="SpectruneExe"
+                  ExeCommand="/installservice"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      Unregister the service before its exe gets deleted — has to run
+      while the file still exists, hence Before="RemoveFiles". Only on a
+      real uninstall (REMOVE="ALL"), not on an upgrade's remove-old-files
+      pass, so a version bump doesn't drop and re-add the service.
+    -->
+    <CustomAction Id="UninstallService"
+                  FileKey="SpectruneExe"
+                  ExeCommand="/uninstallservice"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!--
+      Explicit numeric Sequence values on both Custom actions below, not
+      After/Before — isolated and confirmed a wixl sequencer bug: with two
+      Custom actions present where one of them chains via After off a
+      LATE standard action (RemoveExistingProducts, itself only
+      resolvable after InstallExecute's fixed slot), wixl silently
+      re-resolves EVERY Custom action's position off that same late
+      anchor, regardless of its own individual After/Before hint —
+      UninstallService kept landing at sequence 6503 (after RemoveFiles,
+      i.e. after its own target file was already deleted) no matter what
+      hint or document position it was given, as long as InstallService's
+      After="RemoveExistingProducts" entry was also present. A single
+      Custom action alone always resolved its hint correctly; explicit
+      Sequence numbers sidestep whatever's misfiring in the two-action
+      case entirely. 1801 = right after UnpublishFeatures (1800), well
+      before RemoveFiles (3500). 6502 = right after RemoveExistingProducts
+      (6501, itself right after InstallExecute's fixed 6500 slot), before
+      InstallFinalize (6600). Re-verify both numbers with
+      `msiinfo export spectrune.msi InstallExecuteSequence` after any
+      change near this block — they're only valid because nothing else in
+      the standard sequence sits between UnpublishFeatures/RemoveFiles or
+      InstallExecute/InstallFinalize right now.
+    -->
+    <InstallExecuteSequence>
+      <FindRelatedProducts After="AppSearch" />
+      <Custom Action="UninstallService" Sequence="1801">REMOVE="ALL"</Custom>
+      <!-- Must run before InstallService below: the old product's own
+           uninstall (driven from here) stops+deletes a service with the
+           exact same name ("SpectruneService" never changes release to
+           release) — if InstallService ran first, this would immediately
+           delete the service the new product just registered. -->
+      <InstallExecute After="InstallFiles" />
+      <RemoveExistingProducts After="InstallExecute" />
+      <Custom Action="InstallService" Sequence="6502">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+
+    <UIRef Id="SpectruneUI" />
+    <UIRef Id="WixUI_Common" />
+  </Product>
+
+  <!--
+    Custom install-location wizard page — wixl's bundled "ui" extension
+    only ships WixUI_Minimal (Welcome -> EULA -> Verify -> Progress ->
+    Exit, no directory step) and has no BrowseDlg, so a full graphical
+    folder-tree browser isn't available here. This uses the standard MSI
+    PathEdit control instead: a plain editable text field bound to
+    INSTALLFOLDER, pre-filled with the default path — the user can type a
+    different drive/folder (e.g. "D:\Spectrune") directly. Everything else
+    (WelcomeDlg, VerifyReadyDlg, ProgressDlg, ExitDialog, and their own
+    dependency dialogs like CancelDlg/ErrorDlg) comes from the bundled
+    "ui" extension (wixl's "ext ui" flag); only the Next/Back navigation
+    between them is wired here, since none of those dialogs hardcode a
+    next-dialog target for the plain (non-EULA, non-patch) install path.
+
+    In its own Fragment (this wixl version rejects a bare UI element
+    directly under Product) with an explicit Id so Product can pull it in
+    via UIRef, same pattern the bundled WixUI_Minimal.wxs itself uses.
+  -->
+  <Fragment>
+    <UI Id="SpectruneUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="ExitDialog" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="OutOfDiskDlg" />
+      <DialogRef Id="OutOfRbDiskDlg" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="VerifyReadyDlg" />
+      <DialogRef Id="WelcomeDlg" />
+
+      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="300" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Choose Install Location" />
+        <Control Id="Description" Type="Text" X="20" Y="30" Width="330" Height="12" Transparent="yes" NoPrefix="yes" Text="Choose the folder in which to install [ProductName]." />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="63" Width="330" Height="24" NoPrefix="yes" Text="Spectrune will be installed to the folder below. To install to a different drive or folder, edit the path directly:" />
+        <Control Id="FolderEdit" Type="PathEdit" X="20" Y="90" Width="330" Height="18" Property="INSTALLFOLDER" />
+
+        <Control Id="Back" Type="PushButton" X="156" Y="243" Width="56" Height="17" Text="Back" />
+        <Control Id="Next" Type="PushButton" X="212" Y="243" Width="56" Height="17" Default="yes" Text="Next" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- WelcomeDlg/VerifyReadyDlg/ExitDialog's Next/Back/Finish buttons
+           have no built-in target for this (non-EULA, non-patch) flow —
+           see the comment above the Fragment. -->
+      <!-- Makes VerifyReadyDlg's bundled "Update"-labeled button show
+           instead of "Install" when this run is actually a major upgrade
+           over an already-installed older version — WIX_UPGRADE_DETECTED
+           is set by FindRelatedProducts, which always runs before
+           WelcomeDlg is shown (see the standard InstallUISequence
+           positions). Without this, VerifyReadyDlg's Install button
+           (ShowCondition="NOT Installed AND ALLUSERS") always wins
+           instead, since Installed reflects only this exact ProductCode
+           (which regenerates every release, so it's never "installed"
+           yet from its own point of view) — a fresh install and an
+           in-place upgrade looked identical to the user before this. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Property="WixUI_InstallMode" Value="Update" Condition="WIX_UPGRADE_DETECTED" Order="0" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="1">1</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="1">1</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="1">1</Publish>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg" Order="1">1</Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+    </UI>
+  </Fragment>
+</Wix>
