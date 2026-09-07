@@ -53,8 +53,8 @@
   reinstalled correctly.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <?define ProductCode = "B3547AFB-D3E7-41F6-A5EF-FE01252DD166" ?>
-  <?define ProductVersion = "1.9.2.0" ?>
+  <?define ProductCode = "483B79E2-5EC0-40B6-BEAB-4B49E1C659CA" ?>
+  <?define ProductVersion = "1.9.3.0" ?>
   <!--
     Name includes the version deliberately — [ProductName] is what every
     bundled wizard dialog's title bar and "Welcome to the ... Setup

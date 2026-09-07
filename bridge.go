@@ -48,6 +48,27 @@ const (
 	bridgeAddr  = "10.99.0.1"
 )
 
+// adapterGUID is passed to wintun.CreateAdapter on every Start() instead of
+// nil. A nil GUID tells Wintun to mint a brand-new random one each call, so
+// every Start() created a genuinely new, distinct virtual adapter — Close()
+// on a clean Stop() removes that one, but any Start() that ends via a
+// force-killed process (exactly what the dev-loop deploy script's
+// `Stop-Process -Force` does, and what a crash does too) skips Close()
+// entirely and leaks it forever. Confirmed live 2026-09-07: 32 orphaned
+// "Spectrune" adapters had piled up on the test machine. A fixed GUID makes
+// every Start() address the *same* adapter identity, so Wintun replaces/
+// reuses it in place instead of minting a new one — same fix WireGuard's
+// own Windows client uses (a GUID derived from the tunnel name). This is
+// just a random v4 UUID with no other significance; it must never change,
+// or existing installs would leak one more adapter on their next update
+// before settling.
+var adapterGUID = windows.GUID{
+	Data1: 0x1EFC71CF,
+	Data2: 0xB95E,
+	Data3: 0x40AB,
+	Data4: [8]byte{0x8B, 0x25, 0xF3, 0x55, 0x76, 0xC0, 0x7B, 0x70},
+}
+
 // Bridge is one connect/disconnect cycle's worth of state. Not safe for
 // concurrent Start/Stop calls — callers (main.go today, the future
 // service's RPC handler later) are responsible for serializing them.
@@ -133,7 +154,7 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 		log.Printf("running in pure pass-through mode, everything relays direct")
 	}
 
-	adapter, err := wintun.CreateAdapter(adapterName, tunnelType, nil)
+	adapter, err := wintun.CreateAdapter(adapterName, tunnelType, &adapterGUID)
 	if err != nil {
 		return b.failStart(fmt.Errorf("CreateAdapter: %w", err))
 	}
