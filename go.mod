@@ -10,6 +10,7 @@ require (
 require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 // indirect
+	github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6 // indirect
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
@@ -24,5 +25,3 @@ require (
 )
 
 replace github.com/amnezia-vpn/amneziawg-windows/v3 => /home/kostel/aspt-bridge-amneziawg-windows-src
-
-
