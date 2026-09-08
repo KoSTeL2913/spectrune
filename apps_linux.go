@@ -24,10 +24,21 @@ type DesktopApp struct {
 	Icon string
 }
 
+// desktopDirs lists every directory to scan for .desktop files. This runs
+// inside the root daemon (ListApps is an RPC), where os.UserHomeDir()
+// resolves to /root, not the real desktop user's home — so a per-user
+// entry that only exists under ~/.local/share/applications (confirmed
+// live 2026-09-08: Telegram's own self-registered .desktop file lives
+// exactly there, not in any system-wide directory) was invisible even
+// though the app itself was installed and running. Globbing /home/*
+// instead of relying on the daemon's own notion of "home" sidesteps that
+// without needing the caller to pass its identity over the RPC — a
+// reasonable trade for a personal-desktop app; would need revisiting for
+// genuine multi-user support.
 func desktopDirs() []string {
 	dirs := []string{"/usr/share/applications", "/usr/local/share/applications"}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".local/share/applications"))
+	if homes, err := filepath.Glob("/home/*/.local/share/applications"); err == nil {
+		dirs = append(dirs, homes...)
 	}
 	return dirs
 }
@@ -115,11 +126,49 @@ func parseDesktopFile(path, id string) (DesktopApp, bool, error) {
 	return app, true, nil
 }
 
-// stripFieldCodes removes .desktop Exec's %f/%F/%u/%U/%i/%c/%k field
-// codes (freedesktop.org spec) — this launcher never has a file/URL to
-// hand the app, so they're just dropped rather than substituted.
+// tokenizeExec splits a .desktop Exec= value the way the spec requires —
+// quote-aware, not a naive strings.Fields split. Confirmed necessary live
+// 2026-09-08: Telegram's own self-registered .desktop file quotes its
+// path in single quotes specifically because it contains a space
+// ("Рабочий стол"), e.g. Exec='/home/kostel/Рабочий стол/Telegram' -- %U
+// — plain whitespace-splitting would tear that one path into two bogus
+// tokens ("'/home/kostel/Рабочий" and "стол/Telegram'").
+func tokenizeExec(execLine string) []string {
+	var tokens []string
+	var cur strings.Builder
+	var quote rune // 0, '\'', or '"'
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range execLine {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return tokens
+}
+
+// stripFieldCodes tokenizes execLine and drops .desktop Exec's
+// %f/%F/%u/%U/%i/%c/%k field codes (freedesktop.org spec) — this launcher
+// never has a file/URL to hand the app, so they're just dropped rather
+// than substituted.
 func stripFieldCodes(execLine string) []string {
-	fields := strings.Fields(execLine)
+	fields := tokenizeExec(execLine)
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
 		switch f {
