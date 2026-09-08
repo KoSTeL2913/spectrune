@@ -1,0 +1,11 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=/usr/lib/x86_64-linux-gnu
+includedir=${prefix}/include
+
+Name: JavaScriptCore (4.0 shim -> 4.1)
+Description: JavaScript engine library (shimmed to javascriptcoregtk-4.1)
+Version: 2.52.6
+Requires: glib-2.0
+Libs: -L${libdir} -ljavascriptcoregtk-4.1
+Cflags: -I${includedir}/webkitgtk-4.1
