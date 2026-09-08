@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/spectrune
+    rm -rf /etc/netns/spectrune0
+    ip netns del spectrune0 2>/dev/null || true
+    getent group spectrune >/dev/null && groupdel spectrune || true
+fi
+
+exit 0

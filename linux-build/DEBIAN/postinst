@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+getent group spectrune >/dev/null || groupadd -r spectrune
+
+# $SUDO_USER is set here specifically because this script only ever runs
+# from an interactive "sudo apt install"/"sudo dpkg -i" — unlike the
+# daemon's own startup (systemd, no SUDO_USER at all), this really is the
+# one legitimate place to guess "the installing user". Falls back to a
+# clear manual instruction if it's genuinely unavailable (e.g. installed
+# through some other front-end).
+if [ -n "$SUDO_USER" ]; then
+    usermod -aG spectrune "$SUDO_USER" || true
+    echo "Added $SUDO_USER to the 'spectrune' group — log out and back in for it to take effect."
+else
+    echo "Run 'sudo usermod -aG spectrune <your-username>' and log back in to use Spectrune without a password prompt each time."
+fi
+
+systemctl daemon-reload
+systemctl enable --now spectrune.service
+
+update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+
+exit 0

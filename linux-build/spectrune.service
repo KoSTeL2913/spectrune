@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/spectrune /service
+ExecStart=/usr/bin/spectrune /service
 Restart=on-failure
 RestartSec=2
 
