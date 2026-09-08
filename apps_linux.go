@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -232,7 +233,11 @@ func launchApp(req LaunchAppRequest) error {
 		}
 	}
 	execArgs := stripFieldCodes(target.Exec)
-	execArgs = append(execArgs, multiInstanceFlags(execArgs)...)
+	extraFlags, err := multiInstanceFlags(execArgs, uidStr, gidStr)
+	if err != nil {
+		return fmt.Errorf("multiInstanceFlags: %w", err)
+	}
+	execArgs = append(execArgs, extraFlags...)
 	args = append(args, execArgs...)
 
 	cmd := exec.Command("nsenter", args...)
@@ -246,27 +251,72 @@ func launchApp(req LaunchAppRequest) error {
 	return nil
 }
 
-// multiInstanceExtraFlags maps a launcher binary's basename to whatever
-// flag makes it start a genuinely separate instance instead of forwarding
-// to (and exiting in favor of) an already-running one — most single-
-// instance-locked apps have one for exactly this reason (running multiple
-// accounts side by side), it's just off by default. Windows never needed
-// this: it intercepted an already-running process's live traffic instead
-// of launching a fresh one, so single-instance locking never came up
-// there. Confirmed necessary live 2026-09-08: launching Telegram this way
-// without -many just handed off to the user's already-running instance
-// and the new (correctly namespaced) process exited immediately, so
-// nothing was actually tunneled.
-var multiInstanceExtraFlags = map[string][]string{
-	"Telegram": {"-many"},
+// multiInstanceHandlers maps a launcher binary's basename to whatever it
+// takes to start a genuinely separate instance instead of forwarding to
+// (and exiting in favor of) an already-running one — most single-
+// instance-locked apps support this for exactly this reason (running
+// multiple accounts side by side), it's just off by default. Windows
+// never needed this: it intercepted an already-running process's live
+// traffic instead of launching a fresh one, so single-instance locking
+// never came up there.
+//
+// Confirmed necessary live 2026-09-08 for two different apps with two
+// different failure shapes: Telegram without -many just handed off to
+// the already-running instance and the new (correctly namespaced)
+// process exited immediately, so nothing was tunneled at all. Firefox
+// without -new-instance did something more deceptive — it looked like
+// nothing failed (Firefox itself didn't error, no process even briefly
+// appeared and vanished), but ps showed the "new" tab was actually a
+// -contentproc child of the pre-existing, non-namespaced Firefox (PID
+// unrelated to the one nsenter started) — i.e. it silently forwarded the
+// open-URL request to the old instance over Firefox's remoting protocol
+// rather than rendering anything in the process nsenter actually placed
+// in the tunnel's namespace. -new-instance alone still refuses to start
+// (profile lock held by the already-running instance) — needs a distinct
+// -profile directory too, created here and chowned to the caller so the
+// dropped-privilege process can actually write to it.
+var multiInstanceHandlers = map[string]func(uid, gid string) ([]string, error){
+	"Telegram": func(uid, gid string) ([]string, error) {
+		return []string{"-many"}, nil
+	},
+	"firefox": func(uid, gid string) ([]string, error) {
+		dir, err := freshOwnedTempDir("spectrune-firefox-profile-", uid, gid)
+		if err != nil {
+			return nil, err
+		}
+		return []string{"-new-instance", "-profile", dir}, nil
+	},
 }
 
-func multiInstanceFlags(execArgs []string) []string {
+func freshOwnedTempDir(prefix, uid, gid string) (string, error) {
+	dir, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		return "", err
+	}
+	uidNum, err := strconv.Atoi(uid)
+	if err != nil {
+		return "", fmt.Errorf("bad uid %q: %w", uid, err)
+	}
+	gidNum, err := strconv.Atoi(gid)
+	if err != nil {
+		return "", fmt.Errorf("bad gid %q: %w", gid, err)
+	}
+	if err := os.Chown(dir, uidNum, gidNum); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func multiInstanceFlags(execArgs []string, uid, gid string) ([]string, error) {
 	if len(execArgs) == 0 {
-		return nil
+		return nil, nil
 	}
 	base := filepath.Base(execArgs[0])
-	return multiInstanceExtraFlags[base]
+	handler, ok := multiInstanceHandlers[base]
+	if !ok {
+		return nil, nil
+	}
+	return handler(uid, gid)
 }
 
 // callerFallbackUser is used only if the RPC caller didn't supply
