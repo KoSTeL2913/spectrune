@@ -26,10 +26,12 @@ const spectruneGroup = "spectrune"
 // ipcListen opens the control socket for the daemon side. Creates the
 // "spectrune" system group if it doesn't exist yet (normally a package
 // postinst's job — done here too so the daemon is self-sufficient even
-// run outside a real package install, e.g. during development) and adds
-// the invoking SUDO_USER to it so a fresh install doesn't need a re-login
-// before the group membership takes effect for a *different* shell, only
-// for the one that ran the install.
+// run outside a real package install). Does NOT add any user to the group
+// itself: this normally runs as a systemd service (no SUDO_USER, and no
+// single "the" desktop user to guess on a multi-user box) — adding a
+// specific human to the group is a one-time install-time step
+// (`sudo usermod -aG spectrune $USER`, same as Docker's own group), not
+// something the daemon can decide on every boot.
 func ipcListen() (net.Listener, error) {
 	if err := os.MkdirAll(socketDir, 0o755); err != nil {
 		return nil, fmt.Errorf("MkdirAll %s: %w", socketDir, err)
@@ -40,9 +42,6 @@ func ipcListen() (net.Listener, error) {
 		if out, err := exec.Command("groupadd", "-r", spectruneGroup).CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("groupadd %s: %w (%s)", spectruneGroup, err, out)
 		}
-	}
-	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
-		exec.Command("usermod", "-aG", spectruneGroup, sudoUser).Run() // best-effort
 	}
 
 	l, err := net.Listen("unix", socketPath)

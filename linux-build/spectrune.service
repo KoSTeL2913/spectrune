@@ -1,0 +1,12 @@
+[Unit]
+Description=Spectrune per-application VPN routing daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/spectrune /service
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

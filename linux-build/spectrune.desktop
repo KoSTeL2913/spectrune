@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spectrune
+Comment=Per-application VPN routing
+Exec=sg spectrune -c "/usr/local/bin/spectrune /gui"
+Icon=/usr/local/share/spectrune/spectrune.png
+Terminal=false
+Categories=Network;
