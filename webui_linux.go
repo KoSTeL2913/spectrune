@@ -77,6 +77,26 @@ func runGUI() {
 	bindAPI(w)
 	startHotkeyManager()
 
+	hwin := w.Window()
+
+	tray, err := newTrayIcon(w,
+		func() { w.Dispatch(func() { showWindow(hwin) }) },
+		func() { w.Dispatch(func() { w.Terminate() }) },
+	)
+	var stopPoll chan struct{}
+	if err != nil {
+		// No tray icon means no way to reopen a hidden window — same
+		// reasoning as webui_windows.go's identical fallback: leave the
+		// close button's default (real exit) alone rather than trapping
+		// the user with an unreachable window, so hideToTrayOnClose is
+		// deliberately NOT called in this branch.
+		fmt.Fprintf(os.Stderr, "tray icon unavailable: %v\n", err)
+	} else {
+		hideToTrayOnClose(hwin)
+		stopPoll = make(chan struct{})
+		go pollTrayState(tray, stopPoll)
+	}
+
 	htmlPath, err := writeUIHTMLFile(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "writeUIHTMLFile failed, falling back to SetHtml (theme/background settings won't persist across restarts): %v\n", err)
@@ -85,6 +105,9 @@ func runGUI() {
 		w.Navigate("file://" + htmlPath)
 	}
 	w.Run()
+	if stopPoll != nil {
+		close(stopPoll)
+	}
 }
 
 func must(err error) {
