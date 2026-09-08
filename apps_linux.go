@@ -231,7 +231,9 @@ func launchApp(req LaunchAppRequest) error {
 			args = append(args, k+"="+v)
 		}
 	}
-	args = append(args, stripFieldCodes(target.Exec)...)
+	execArgs := stripFieldCodes(target.Exec)
+	execArgs = append(execArgs, multiInstanceFlags(execArgs)...)
+	args = append(args, execArgs...)
 
 	cmd := exec.Command("nsenter", args...)
 	// Detached, not waited on — this is "open an app," not "run a command
@@ -242,6 +244,29 @@ func launchApp(req LaunchAppRequest) error {
 	}
 	go cmd.Wait() // reap it, avoid a zombie; nothing else needs its exit status
 	return nil
+}
+
+// multiInstanceExtraFlags maps a launcher binary's basename to whatever
+// flag makes it start a genuinely separate instance instead of forwarding
+// to (and exiting in favor of) an already-running one — most single-
+// instance-locked apps have one for exactly this reason (running multiple
+// accounts side by side), it's just off by default. Windows never needed
+// this: it intercepted an already-running process's live traffic instead
+// of launching a fresh one, so single-instance locking never came up
+// there. Confirmed necessary live 2026-09-08: launching Telegram this way
+// without -many just handed off to the user's already-running instance
+// and the new (correctly namespaced) process exited immediately, so
+// nothing was actually tunneled.
+var multiInstanceExtraFlags = map[string][]string{
+	"Telegram": {"-many"},
+}
+
+func multiInstanceFlags(execArgs []string) []string {
+	if len(execArgs) == 0 {
+		return nil
+	}
+	base := filepath.Base(execArgs[0])
+	return multiInstanceExtraFlags[base]
 }
 
 // callerFallbackUser is used only if the RPC caller didn't supply

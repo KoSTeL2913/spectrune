@@ -135,6 +135,50 @@ func (s *Service) ListApps(_ struct{}, reply *[]DesktopApp) error {
 	return nil
 }
 
+// AppIconValue returns a .desktop entry's raw Icon= value (either a theme
+// icon name or an absolute path — resolving either into an actual image
+// happens GUI-side, in icons_linux.go, since that's where GTK's icon
+// theme (a desktop-session, not-root concern) is already linked in).
+func (s *Service) AppIconValue(desktopID string, reply *string) error {
+	apps, err := listDesktopApps()
+	if err != nil {
+		return err
+	}
+	for _, a := range apps {
+		if a.ID == desktopID {
+			*reply = a.Icon
+			return nil
+		}
+	}
+	return fmt.Errorf("no such app %q", desktopID)
+}
+
+func (s *Service) ListAppPresets(_ struct{}, reply *[]string) error {
+	names, err := listAppPresetNames()
+	if err != nil {
+		return err
+	}
+	*reply = names
+	return nil
+}
+
+func (s *Service) SaveAppPreset(req AppPresetSaveRequest, _ *struct{}) error {
+	return saveAppPreset(req.Name, req.Apps)
+}
+
+func (s *Service) LoadAppPreset(name string, reply *[]string) error {
+	apps, err := loadAppPreset(name)
+	if err != nil {
+		return err
+	}
+	*reply = apps
+	return nil
+}
+
+func (s *Service) DeleteAppPreset(name string, _ *struct{}) error {
+	return deleteAppPreset(name)
+}
+
 func (s *Service) LaunchApp(req LaunchAppRequest, _ *struct{}) error {
 	return launchApp(req)
 }

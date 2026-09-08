@@ -75,6 +75,7 @@ func runGUI() {
 	w.SetSize(560, 640, webview.HintNone)
 
 	bindAPI(w)
+	startHotkeyManager()
 
 	htmlPath, err := writeUIHTMLFile(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
 	if err != nil {
@@ -121,7 +122,7 @@ func bindAPI(w webview.WebView) {
 			ConfigText:   cfg.ToWgQuick(),
 			IncludedApps: cfg.IncludedApps,
 			AutoConnect:  cfg.AutoConnect,
-			Hotkey:       "", // no global-hotkey support on Linux yet
+			Hotkey:       cfg.Hotkey,
 		}, nil
 	}))
 
@@ -135,6 +136,7 @@ func bindAPI(w webview.WebView) {
 		}
 		cfg.IncludedApps = includedApps
 		cfg.AutoConnect = autoConnect
+		cfg.Hotkey = hotkey
 		client, err := ipcDial()
 		if err != nil {
 			return err
@@ -217,12 +219,17 @@ func bindAPI(w webview.WebView) {
 		return out, nil
 	}))
 
-	// getAppIcon: no Linux icon-theme lookup implemented yet (GTK icon
-	// theme resolution + SVG/PNG rendering to a data URI is real work on
-	// its own) — the app list still functions with a blank icon, so this
-	// is deferred rather than blocking the rest of the GUI.
 	must(w.Bind("getAppIcon", func(path string) (string, error) {
-		return "", nil
+		client, err := ipcDial()
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		var iconValue string
+		if err := client.Call("Bridge.AppIconValue", path, &iconValue); err != nil {
+			return "", err
+		}
+		return getAppIconDataURI(iconValue)
 	}))
 
 	must(w.Bind("browseForExe", func() (string, error) {
@@ -241,16 +248,52 @@ func bindAPI(w webview.WebView) {
 		return imageToDataURI(path, data)
 	}))
 
-	// App presets: not yet ported to Linux (a small feature on top of
-	// profile storage, not core to per-app routing) — empty/no-op rather
-	// than a hard error, so the GUI's presets panel just shows nothing
-	// instead of failing to render.
-	must(w.Bind("listAppPresets", func() ([]string, error) { return nil, nil }))
-	must(w.Bind("saveAppPreset", func(name string, apps []string) error {
-		return fmt.Errorf("app presets aren't implemented on Linux yet")
+	must(w.Bind("listAppPresets", func() ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var names []string
+		if err := client.Call("Bridge.ListAppPresets", struct{}{}, &names); err != nil {
+			return nil, err
+		}
+		return names, nil
 	}))
-	must(w.Bind("loadAppPreset", func(name string) ([]string, error) { return nil, nil }))
-	must(w.Bind("deleteAppPreset", func(name string) error { return nil }))
+
+	must(w.Bind("saveAppPreset", func(name string, apps []string) error {
+		if !profileNameIsValid(name) {
+			return fmt.Errorf("preset name %q is not valid", name)
+		}
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.SaveAppPreset", AppPresetSaveRequest{Name: name, Apps: apps}, &struct{}{})
+	}))
+
+	must(w.Bind("loadAppPreset", func(name string) ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var apps []string
+		if err := client.Call("Bridge.LoadAppPreset", name, &apps); err != nil {
+			return nil, err
+		}
+		return apps, nil
+	}))
+
+	must(w.Bind("deleteAppPreset", func(name string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.DeleteAppPreset", name, &struct{}{})
+	}))
 
 	must(w.Bind("importConfig", func() (string, error) {
 		path, err := zenityFilePicker("Import configuration")

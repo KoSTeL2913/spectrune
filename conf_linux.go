@@ -42,6 +42,7 @@ type LinuxConfig struct {
 	// tunnel's namespace" rather than "intercepted and matched by PID".
 	IncludedApps []string
 	AutoConnect  bool
+	Hotkey       string // "Ctrl+Alt+F1" form, see hotkeys_linux.go
 }
 
 func b64ToHex(b64 string) (string, error) {
@@ -114,6 +115,8 @@ func ParseWgQuick(text, name string) (*LinuxConfig, error) {
 			}
 		case section == "interface" && key == "autoconnect":
 			cfg.AutoConnect = strings.EqualFold(val, "true")
+		case section == "interface" && key == "hotkey":
+			cfg.Hotkey = val
 		case section == "peer" && key == "publickey":
 			cfg.PeerPublicKey = val
 		case section == "peer" && key == "presharedkey":
@@ -190,6 +193,9 @@ func (c *LinuxConfig) ToWgQuick() string {
 	}
 	if c.AutoConnect {
 		fmt.Fprintf(&b, "AutoConnect = true\n")
+	}
+	if c.Hotkey != "" {
+		fmt.Fprintf(&b, "Hotkey = %s\n", c.Hotkey)
 	}
 	b.WriteString("\n[Peer]\n")
 	fmt.Fprintf(&b, "PublicKey = %s\n", c.PeerPublicKey)

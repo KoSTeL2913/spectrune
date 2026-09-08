@@ -48,7 +48,18 @@ func dispatch(cmd string, args []string) bool {
 		fatalIf(err)
 		defer client.Close()
 		fatalIf(client.Call("Bridge.Connect", args[0], &struct{}{}))
-		fmt.Printf("connected: %s\n", args[0])
+		// The RPC only means "the namespace/tunnel came up," not "a
+		// handshake succeeded" — printing "connected" unconditionally
+		// here was misleading (confirmed live 2026-09-08 against a peer
+		// whose handshake never completes). Report what /status itself
+		// would say instead of a canned success message.
+		var reply StateReply
+		fatalIf(client.Call("Bridge.State", struct{}{}, &reply))
+		if reply.HandshakeOK {
+			fmt.Printf("connected: %s\n", args[0])
+		} else {
+			fmt.Printf("connecting: %s (no handshake yet)\n", args[0])
+		}
 	case "/disconnect":
 		client, err := ipcDial()
 		fatalIf(err)
