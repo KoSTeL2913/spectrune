@@ -224,7 +224,20 @@ func launchApp(req LaunchAppRequest) error {
 		uidStr, gidStr = u.Uid, u.Gid
 	}
 
-	args := []string{"--net=/var/run/netns/" + netnsName,
+	// "ip netns exec <name>" rather than "nsenter --net=/var/run/netns/<name>"
+	// — they both switch the network namespace, but only "ip netns exec"
+	// also bind-mounts /etc/netns/<name>/resolv.conf over /etc/resolv.conf
+	// (see netns_linux.go's Start(), which writes that file). nsenter alone
+	// leaves the ROOT mount namespace's /etc/resolv.conf in place, which
+	// points at systemd-resolved's stub (127.0.0.53) — unreachable from
+	// inside the isolated network namespace. Confirmed live 2026-09-09: a
+	// launched app landed in the correct network namespace (verified via
+	// /proc/<pid>/ns/net) and could even complete a raw-IP connection, but
+	// every single hostname lookup failed silently, so nothing it actually
+	// tried to browse to ever loaded — invisible from the launch side,
+	// since exec.Command.Start() only reports whether the process started,
+	// not whether it can resolve DNS.
+	args := []string{"netns", "exec", netnsName,
 		"setpriv", "--reuid=" + uidStr, "--regid=" + gidStr, "--clear-groups", "--inh-caps=-all", "--",
 		"env"}
 	for _, k := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
@@ -240,12 +253,12 @@ func launchApp(req LaunchAppRequest) error {
 	execArgs = append(execArgs, extraFlags...)
 	args = append(args, execArgs...)
 
-	cmd := exec.Command("nsenter", args...)
+	cmd := exec.Command("ip", args...)
 	// Detached, not waited on — this is "open an app," not "run a command
 	// and collect its output." The launched app keeps running after this
 	// RPC returns, same as double-clicking it normally would.
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("nsenter: %w", err)
+		return fmt.Errorf("ip netns exec: %w", err)
 	}
 	go cmd.Wait() // reap it, avoid a zombie; nothing else needs its exit status
 	return nil
