@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -184,18 +185,35 @@ func stripFieldCodes(execLine string) []string {
 // LaunchAppRequest bundles LaunchApp's arguments — net/rpc methods take
 // exactly one request value. The caller (the GUI, already running as the
 // target user in the target desktop session) supplies its own session
-// environment: nsenter only isolates networking, so once privileges are
-// dropped inside the namespace the launched app needs these to display on
-// the real desktop, use the sound server, talk to D-Bus, etc.
+// environment: the launched process needs it to display on the real
+// desktop, use the sound server, talk to D-Bus, etc.
 type LaunchAppRequest struct {
 	DesktopID string
 	Env       map[string]string // DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS
 }
 
-// LaunchApp runs the given .desktop entry's command inside the tunnel's
-// namespace, dropped to the calling user's own UID/GID first (this method
-// runs in the root daemon, which is the only thing with permission to
-// enter the namespace at all — see the plan's "Per-app launch mechanism").
+// execTargetBase returns the .desktop entry's command basename (e.g.
+// "firefox" from "firefox %u") — used both to launch it and, via
+// resolveAppBinaries/matchingPIDs below, to recognize it if it's already
+// running.
+func execTargetBase(execLine string) string {
+	args := stripFieldCodes(execLine)
+	if len(args) == 0 {
+		return ""
+	}
+	return filepath.Base(args[0])
+}
+
+// LaunchApp starts the given .desktop entry's command as the calling
+// user (no privilege drop needed here — the daemon just runs it exactly
+// like a normal launcher would) and immediately moves the resulting PID
+// into the routing cgroup (routing_linux.go's addPIDToCgroup) so it's
+// tunneled from its very first packet, rather than waiting for the next
+// matchLoop tick. Unlike the old namespace-based version, this is *not*
+// trying to force a separate instance — if the app has single-instance
+// locking and hands off to an already-running one, that's fine now: the
+// whole point of switching to cgroups was to be able to include an
+// already-running process directly, so there's nothing to work around.
 func launchApp(req LaunchAppRequest) error {
 	var target DesktopApp
 	found := false
@@ -224,112 +242,93 @@ func launchApp(req LaunchAppRequest) error {
 		uidStr, gidStr = u.Uid, u.Gid
 	}
 
-	// "ip netns exec <name>" rather than "nsenter --net=/var/run/netns/<name>"
-	// — they both switch the network namespace, but only "ip netns exec"
-	// also bind-mounts /etc/netns/<name>/resolv.conf over /etc/resolv.conf
-	// (see netns_linux.go's Start(), which writes that file). nsenter alone
-	// leaves the ROOT mount namespace's /etc/resolv.conf in place, which
-	// points at systemd-resolved's stub (127.0.0.53) — unreachable from
-	// inside the isolated network namespace. Confirmed live 2026-09-09: a
-	// launched app landed in the correct network namespace (verified via
-	// /proc/<pid>/ns/net) and could even complete a raw-IP connection, but
-	// every single hostname lookup failed silently, so nothing it actually
-	// tried to browse to ever loaded — invisible from the launch side,
-	// since exec.Command.Start() only reports whether the process started,
-	// not whether it can resolve DNS.
-	args := []string{"netns", "exec", netnsName,
-		"setpriv", "--reuid=" + uidStr, "--regid=" + gidStr, "--clear-groups", "--inh-caps=-all", "--",
-		"env"}
+	args := []string{"--reuid=" + uidStr, "--regid=" + gidStr, "--clear-groups", "--inh-caps=-all", "--", "env"}
 	for _, k := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
 		if v, ok := req.Env[k]; ok && v != "" {
 			args = append(args, k+"="+v)
 		}
 	}
-	execArgs := stripFieldCodes(target.Exec)
-	extraFlags, err := multiInstanceFlags(execArgs, uidStr, gidStr)
-	if err != nil {
-		return fmt.Errorf("multiInstanceFlags: %w", err)
-	}
-	execArgs = append(execArgs, extraFlags...)
-	args = append(args, execArgs...)
+	args = append(args, stripFieldCodes(target.Exec)...)
 
-	cmd := exec.Command("ip", args...)
+	cmd := exec.Command("setpriv", args...)
 	// Detached, not waited on — this is "open an app," not "run a command
 	// and collect its output." The launched app keeps running after this
 	// RPC returns, same as double-clicking it normally would.
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("ip netns exec: %w", err)
+		return fmt.Errorf("setpriv: %w", err)
 	}
+	pid := cmd.Process.Pid
 	go cmd.Wait() // reap it, avoid a zombie; nothing else needs its exit status
+
+	// Best-effort — if this fails (e.g. the process already exited, or
+	// itself immediately re-exec'd into something with a different PID,
+	// which setpriv's own exec doesn't do), matchLoop will pick it up on
+	// its own within matchInterval anyway once it (or whatever it forked)
+	// shows up under its real name.
+	if err := addPIDToCgroup(pid); err != nil {
+		log.Printf("launchApp: addPIDToCgroup(%d): %v (matchLoop will retry)", pid, err)
+	}
 	return nil
 }
 
-// multiInstanceHandlers maps a launcher binary's basename to whatever it
-// takes to start a genuinely separate instance instead of forwarding to
-// (and exiting in favor of) an already-running one — most single-
-// instance-locked apps support this for exactly this reason (running
-// multiple accounts side by side), it's just off by default. Windows
-// never needed this: it intercepted an already-running process's live
-// traffic instead of launching a fresh one, so single-instance locking
-// never came up there.
-//
-// Confirmed necessary live 2026-09-08 for two different apps with two
-// different failure shapes: Telegram without -many just handed off to
-// the already-running instance and the new (correctly namespaced)
-// process exited immediately, so nothing was tunneled at all. Firefox
-// without -new-instance did something more deceptive — it looked like
-// nothing failed (Firefox itself didn't error, no process even briefly
-// appeared and vanished), but ps showed the "new" tab was actually a
-// -contentproc child of the pre-existing, non-namespaced Firefox (PID
-// unrelated to the one nsenter started) — i.e. it silently forwarded the
-// open-URL request to the old instance over Firefox's remoting protocol
-// rather than rendering anything in the process nsenter actually placed
-// in the tunnel's namespace. -new-instance alone still refuses to start
-// (profile lock held by the already-running instance) — needs a distinct
-// -profile directory too, created here and chowned to the caller so the
-// dropped-privilege process can actually write to it.
-var multiInstanceHandlers = map[string]func(uid, gid string) ([]string, error){
-	"Telegram": func(uid, gid string) ([]string, error) {
-		return []string{"-many"}, nil
-	},
-	"firefox": func(uid, gid string) ([]string, error) {
-		dir, err := freshOwnedTempDir("spectrune-firefox-profile-", uid, gid)
-		if err != nil {
-			return nil, err
+// resolveAppBinaries turns a profile's IncludedApps (.desktop entry IDs)
+// into the command basenames matchingPIDs actually compares against.
+func resolveAppBinaries(desktopIDs []string) []string {
+	if len(desktopIDs) == 0 {
+		return nil
+	}
+	apps, err := listDesktopApps()
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]DesktopApp, len(apps))
+	for _, a := range apps {
+		byID[a.ID] = a
+	}
+	var out []string
+	for _, id := range desktopIDs {
+		if a, ok := byID[id]; ok {
+			if base := execTargetBase(a.Exec); base != "" {
+				out = append(out, base)
+			}
 		}
-		return []string{"-new-instance", "-profile", dir}, nil
-	},
+	}
+	return out
 }
 
-func freshOwnedTempDir(prefix, uid, gid string) (string, error) {
-	dir, err := os.MkdirTemp("", prefix)
+// matchingPIDs scans /proc for running processes whose real executable
+// matches one of targets (command basenames from resolveAppBinaries).
+// Matching is by basename, not full path — most apps run through a
+// wrapper script (/usr/bin/firefox is a shell script; the process /proc/
+// <pid>/exe actually points to is /usr/lib/firefox/firefox-bin) so exact-
+// path matching would never hit. "firefox-bin" starting with "firefox-"
+// (target + "-") catches that pattern, which is common enough (Chrome,
+// Firefox, most Electron apps) to be worth a dedicated check rather than
+// requiring an exact basename match.
+func matchingPIDs(targets []string) []int {
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return "", err
+		return nil
 	}
-	uidNum, err := strconv.Atoi(uid)
-	if err != nil {
-		return "", fmt.Errorf("bad uid %q: %w", uid, err)
+	var pids []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe"))
+		if err != nil {
+			continue // permission denied (not ours/not readable) or already gone
+		}
+		base := filepath.Base(exe)
+		for _, t := range targets {
+			if base == t || strings.HasPrefix(base, t+"-") {
+				pids = append(pids, pid)
+				break
+			}
+		}
 	}
-	gidNum, err := strconv.Atoi(gid)
-	if err != nil {
-		return "", fmt.Errorf("bad gid %q: %w", gid, err)
-	}
-	if err := os.Chown(dir, uidNum, gidNum); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-func multiInstanceFlags(execArgs []string, uid, gid string) ([]string, error) {
-	if len(execArgs) == 0 {
-		return nil, nil
-	}
-	base := filepath.Base(execArgs[0])
-	handler, ok := multiInstanceHandlers[base]
-	if !ok {
-		return nil, nil
-	}
-	return handler(uid, gid)
+	return pids
 }
 
 // callerFallbackUser is used only if the RPC caller didn't supply

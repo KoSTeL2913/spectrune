@@ -88,7 +88,23 @@ func (s *Service) ListProfiles(_ struct{}, reply *[]string) error {
 }
 
 func (s *Service) SaveProfile(cfg LinuxConfig, _ *struct{}) error {
-	return saveProfile(&cfg)
+	if err := saveProfile(&cfg); err != nil {
+		return err
+	}
+	// If this is the profile that's actually connected right now, push the
+	// new app selection into the running routing setup immediately —
+	// mirrors service_windows.go's SaveProfile, and matters more here than
+	// it used to: editing the Apps list is now how you tell an
+	// already-running app "start tunneling," not just a pre-connect setup
+	// step.
+	s.mu.Lock()
+	bridge := s.bridge
+	isActive := s.bridge != nil && s.activeProfile == cfg.Name
+	s.mu.Unlock()
+	if isActive {
+		bridge.UpdateIncludedApps(cfg.IncludedApps)
+	}
+	return nil
 }
 
 func (s *Service) LoadProfile(name string, reply *LinuxConfig) error {
