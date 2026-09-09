@@ -3,8 +3,16 @@ set -e
 
 if [ "$1" = "purge" ]; then
     rm -rf /var/lib/spectrune
-    rm -rf /etc/netns/spectrune0
-    ip netns del spectrune0 2>/dev/null || true
+    # Belt-and-suspenders: prerm's `systemctl stop` already runs the
+    # daemon's own teardownRouting() (routing_linux.go), which removes
+    # all of this normally. Only matters here if the service was killed
+    # uncleanly and skipped that.
+    iptables -t mangle -D OUTPUT -m cgroup --path spectrune -j MARK --set-mark 0xca11 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -o spectrune0 -j MASQUERADE 2>/dev/null || true
+    ip rule del fwmark 0xca11 table 100 2>/dev/null || true
+    ip route flush table 100 2>/dev/null || true
+    ip link del spectrune0 2>/dev/null || true
+    rm -rf /sys/fs/cgroup/spectrune
     getent group spectrune >/dev/null && groupdel spectrune || true
 fi
 

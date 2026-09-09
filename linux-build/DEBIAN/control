@@ -3,11 +3,11 @@ Version: 1.9.3.0
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libwebkit2gtk-4.1-0, libgtk-3-0, iproute2, util-linux
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0, iproute2, util-linux, iptables
 Recommends: zenity
 Maintainer: KoSTeL2913 <kostyas2913@gmail.com>
 Description: Per-application VPN routing over AmneziaWG/WireGuard
  Spectrune is a standalone VPN client with per-application traffic
- routing. Each connection profile runs in its own network namespace;
- launching an application from Spectrune routes just that app's traffic
- through the tunnel, leaving the rest of the system untouched.
+ routing. Selecting an application routes its traffic (including an
+ already-running instance, not just freshly-launched ones) through the
+ tunnel via a dedicated cgroup, leaving the rest of the system untouched.
