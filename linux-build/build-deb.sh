@@ -4,12 +4,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION=$(grep -oP 'const appVersion = "\K[^"]+' version.go)
+VERSION=$(grep -oP 'const appVersion = "\K[^"]+' cmd/spectrune/version.go)
 PKGROOT="/tmp/spectrune-deb-build/spectrune_${VERSION}_amd64"
 
 echo "Building spectrune ${VERSION} for Linux..."
 PKG_CONFIG_PATH="$(pwd)/linux-build/pkgconfig-shim" GOOS=linux GOARCH=amd64 \
-    go build -o /tmp/spectrune-deb-build/spectrune .
+    go build -o /tmp/spectrune-deb-build/spectrune ./cmd/spectrune
 
 rm -rf "$PKGROOT"
 mkdir -p "$PKGROOT/DEBIAN" \

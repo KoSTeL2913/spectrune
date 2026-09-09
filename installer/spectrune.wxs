@@ -122,7 +122,7 @@
     </Condition>
     <Media Id="1" Cabinet="spectrune.cab" EmbedCab="yes" />
 
-    <Icon Id="AppIcon" SourceFile="../assets/app.ico" />
+    <Icon Id="AppIcon" SourceFile="../cmd/spectrune/assets/app.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
     <Property Id="ARPNOMODIFY" Value="1" />
 
@@ -138,7 +138,7 @@
                  every manual deploy this session copied it once early on
                  and never touched it again, so its absence from the MSI
                  went unnoticed until a real from-scratch install. -->
-            <File Id="WintunDll" Name="wintun.dll" Source="../wintun.dll" />
+            <File Id="WintunDll" Name="wintun.dll" Source="wintun.dll" />
           </Component>
         </Directory>
       </Directory>
