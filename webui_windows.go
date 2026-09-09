@@ -464,4 +464,15 @@ func bindAPI(w webview2.WebView) {
 		}
 		return string(data), nil
 	}))
+
+	// getAutostartEnabled/setAutostartEnabled back the "Launch on Windows
+	// startup" toggle in webui_html.go's settings panel — see
+	// autostart_windows.go. No Linux equivalent (feature-detected there
+	// via window.getAutostartEnabled), so this pair only exists here.
+	must(w.Bind("getAutostartEnabled", func() (bool, error) {
+		return isAutostartEnabled()
+	}))
+	must(w.Bind("setAutostartEnabled", func(enable bool) error {
+		return setAutostartEnabled(enable)
+	}))
 }
