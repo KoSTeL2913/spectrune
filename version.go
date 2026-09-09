@@ -6,4 +6,4 @@ package main
 // installer/spectrune.wxs's ProductVersion <?define?> by hand — there's
 // no single source of truth between the Go build and the MSI, so bump
 // both on every release.
-const appVersion = "1.9.3.0"
+const appVersion = "1.9.4.0"
