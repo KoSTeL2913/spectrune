@@ -238,10 +238,10 @@ func runGUI() {
 	// storage partition, so writing the page out once per launch and
 	// navigating to it fixes this without needing WebView2 APIs
 	// go-webview2 doesn't expose (like VirtualHostNameToFolderMapping).
-	htmlPath, err := writeUIHTMLFile(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
+	htmlPath, err := writeUIHTMLFile(strings.ReplaceAll(webUIHTML, "%%VERSION%%", appVersion))
 	if err != nil {
 		log.Printf("writeUIHTMLFile failed, falling back to SetHtml (theme/background settings won't persist across restarts): %v", err)
-		w.SetHtml(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
+		w.SetHtml(strings.ReplaceAll(webUIHTML, "%%VERSION%%", appVersion))
 	} else {
 		fileURL := url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(htmlPath)}
 		w.Navigate(fileURL.String())
@@ -383,6 +383,23 @@ func bindAPI(w webview2.WebView) {
 			return nil, err
 		}
 		return &state, nil
+	}))
+
+	// checkForUpdateNow backs the "Check for updates" button in
+	// webui_html.go's settings panel — see update_windows.go's
+	// CheckForUpdateNow (bypasses the once-per-launch throttle, reports
+	// back immediately, installs in the background if newer).
+	must(w.Bind("checkForUpdateNow", func() (*UpdateCheckReply, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var reply UpdateCheckReply
+		if err := client.Call("Bridge.CheckForUpdateNow", struct{}{}, &reply); err != nil {
+			return nil, err
+		}
+		return &reply, nil
 	}))
 
 	must(w.Bind("listInstalledApps", func() ([]installedApp, error) {

@@ -342,6 +342,10 @@ const webUIHTML = `<!DOCTYPE html>
       <button id="theme-bg-fit-contain" class="theme-mode-btn" data-i18n="themeBgFitContain">Whole photo</button>
       <button id="theme-bg-fit-cover" class="theme-mode-btn" data-i18n="themeBgFitCover">Fill (crop)</button>
     </div>
+    <div class="theme-panel-row" style="justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:9px">
+      <span id="update-status-text" class="hint" style="margin:0"></span>
+      <button id="btn-check-update" data-i18n="updateCheckButton">Check for updates</button>
+    </div>
   </div>
 </div>
 
@@ -489,6 +493,9 @@ var I18N = {
     noAppsFullTunnel: 'Nothing selected — all traffic goes through the VPN.',
     settingsTitle: 'Settings', settingsLanguage: 'Language',
     settingsAutostart: 'Launch on Windows startup',
+    updateVersionLine: 'Version %%VERSION%%', updateCheckButton: 'Check for updates',
+    updateChecking: 'Checking…', updateUpToDate: 'Up to date (%s)',
+    updateAvailable: 'Updating to %s…', updateCheckFailed: 'Update check failed: %s',
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
     presetLoad: 'Load', presetSaveAs: 'Save as…', presetDelete: 'Delete',
@@ -533,6 +540,9 @@ var I18N = {
     noAppsFullTunnel: 'Ничего не выбрано — весь трафик идёт через VPN.',
     settingsTitle: 'Настройки', settingsLanguage: 'Язык',
     settingsAutostart: 'Запускать при старте Windows',
+    updateVersionLine: 'Версия %%VERSION%%', updateCheckButton: 'Проверить обновления',
+    updateChecking: 'Проверка…', updateUpToDate: 'Актуальная версия (%s)',
+    updateAvailable: 'Обновление до %s…', updateCheckFailed: 'Ошибка проверки: %s',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
     presetLoad: 'Загрузить', presetSaveAs: 'Сохранить как…', presetDelete: 'Удалить',
@@ -563,6 +573,18 @@ function t(key) {
   return dict[key] !== undefined ? dict[key] : (I18N.en[key] || key);
 }
 function tf(key, val) { return t(key).replace(/%s|%d/, val); }
+
+// %%VERSION%% is substituted server-side (webui_linux.go/webui_windows.go's
+// runGUI, over the whole HTML document text) before this script ever
+// runs — same placeholder the .version-tag footer already uses. Stashed
+// into a JS var, not read straight off a data-i18n element, because
+// applyI18n() re-renders those from the dictionary (which still holds
+// the literal, unsubstituted placeholder) on every language switch.
+var appVersionStr = '%%VERSION%%';
+
+function renderUpdateStatus() {
+  $('update-status-text').textContent = tf('updateVersionLine', appVersionStr);
+}
 
 var state = {
   profiles: [],
@@ -1453,6 +1475,7 @@ function applyI18n() {
   updateAppsCount();
   updateDomainsCount();
   renderHotkeyValue();
+  renderUpdateStatus();
   if ($('view-apps').classList.contains('active')) renderAppsList();
   if ($('view-domains').classList.contains('active')) renderDomainsList();
 }
@@ -1560,6 +1583,7 @@ function setThemeCustomColors() {
 function openSettings() {
   $('settings-overlay').style.display = 'flex';
   $('settings-toggle-btn').classList.add('active');
+  renderUpdateStatus();
   // getAutostartEnabled only exists on Windows (autostart_windows.go) —
   // the daemon already starts itself on Linux via systemd, this toggle
   // is purely about the GUI/tray front-end reappearing after login.
@@ -1585,6 +1609,17 @@ $('settings-autostart-toggle').onchange = function() {
     $('settings-autostart-toggle').checked = !checked; // revert on failure
     showListError(err);
   });
+};
+$('btn-check-update').onclick = function() {
+  $('btn-check-update').disabled = true;
+  $('update-status-text').textContent = t('updateChecking');
+  checkForUpdateNow().then(function(reply) {
+    $('update-status-text').textContent = reply.Available
+      ? tf('updateAvailable', reply.Latest)
+      : tf('updateUpToDate', reply.Current);
+  }).catch(function(err) {
+    $('update-status-text').textContent = tf('updateCheckFailed', String(err));
+  }).finally(function() { $('btn-check-update').disabled = false; });
 };
 $('theme-mode-dark').onclick = function() { setThemeMode('dark'); };
 $('theme-mode-light').onclick = function() { setThemeMode('light'); };

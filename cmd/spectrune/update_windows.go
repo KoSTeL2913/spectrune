@@ -62,26 +62,65 @@ func checkForUpdateOnLaunch() {
 // CheckAndInstallUpdate is fire-and-forget from the client's point of view
 // — it returns immediately and does the actual check/download/install in
 // the background, so a GUI launch never blocks on network I/O here.
+// Respects updateCheckThrottle — this is the automatic once-per-launch
+// path, not a user pressing a button (that's CheckForUpdateNow below).
 func (s *Service) CheckAndInstallUpdate(_ struct{}, _ *struct{}) error {
-	go runUpdateCheck()
+	go func() {
+		if !updateCheckDue() {
+			return
+		}
+		recordUpdateCheck()
+		release, err := fetchLatestRelease()
+		if err != nil {
+			log.Printf("update check: %v", err)
+			return
+		}
+		if !isNewerVersion(appVersion, release.TagName) {
+			return
+		}
+		installRelease(release)
+	}()
 	return nil
 }
 
-func runUpdateCheck() {
-	if !updateCheckDue() {
-		return
-	}
-	recordUpdateCheck()
+// UpdateCheckReply is what the "Check for updates" button in
+// webui_html.go's settings panel actually gets to show the user —
+// CheckAndInstallUpdate above returns nothing because it's silent by
+// design, but a button the user just clicked needs to say *something*
+// back immediately, even though the download/install itself still
+// happens in the background afterwards.
+type UpdateCheckReply struct {
+	Available bool
+	Latest    string // e.g. "1.9.7.0", "" if Available is false
+	Current   string
+}
 
+// CheckForUpdateNow bypasses updateCheckThrottle (a deliberate click
+// should always actually check) and reports back synchronously whether
+// a newer release exists, but still installs it in the background —
+// downloading + a silent msiexec install is not something to make the
+// GUI wait on.
+func (s *Service) CheckForUpdateNow(_ struct{}, reply *UpdateCheckReply) error {
+	reply.Current = appVersion
 	release, err := fetchLatestRelease()
 	if err != nil {
-		log.Printf("update check: %v", err)
-		return
+		return err
 	}
+	recordUpdateCheck()
+	latest := strings.TrimPrefix(strings.TrimSpace(release.TagName), "v")
 	if !isNewerVersion(appVersion, release.TagName) {
-		return
+		return nil
 	}
+	reply.Available = true
+	reply.Latest = latest
+	go installRelease(release)
+	return nil
+}
 
+// installRelease downloads release's .msi asset and installs it
+// silently. Best-effort: every failure just logs and returns, matching
+// the fully-silent auto-check path this is shared with.
+func installRelease(release *ghRelease) {
 	var msiURL string
 	for _, a := range release.Assets {
 		if strings.HasSuffix(strings.ToLower(a.Name), ".msi") {

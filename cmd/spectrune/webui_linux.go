@@ -99,10 +99,10 @@ func runGUI() {
 		go pollTrayState(tray, stopPoll)
 	}
 
-	htmlPath, err := writeUIHTMLFile(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
+	htmlPath, err := writeUIHTMLFile(strings.ReplaceAll(webUIHTML, "%%VERSION%%", appVersion))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "writeUIHTMLFile failed, falling back to SetHtml (theme/background settings won't persist across restarts): %v\n", err)
-		w.SetHtml(strings.Replace(webUIHTML, "%%VERSION%%", appVersion, 1))
+		w.SetHtml(strings.ReplaceAll(webUIHTML, "%%VERSION%%", appVersion))
 	} else {
 		w.Navigate("file://" + htmlPath)
 	}
@@ -222,6 +222,23 @@ func bindAPI(w webview.WebView) {
 			return nil, err
 		}
 		return &state, nil
+	}))
+
+	// checkForUpdateNow backs the "Check for updates" button in
+	// webui_html.go's settings panel — see update_linux.go's
+	// CheckForUpdateNow (bypasses the once-per-launch throttle, reports
+	// back immediately, installs in the background if newer).
+	must(w.Bind("checkForUpdateNow", func() (*UpdateCheckReply, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var reply UpdateCheckReply
+		if err := client.Call("Bridge.CheckForUpdateNow", struct{}{}, &reply); err != nil {
+			return nil, err
+		}
+		return &reply, nil
 	}))
 
 	// listInstalledApps / a picked app's "Path" both go through the
