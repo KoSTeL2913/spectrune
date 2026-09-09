@@ -165,6 +165,10 @@ const webUIHTML = `<!DOCTYPE html>
   .app-path { color: var(--muted); font-size: 11px; }
   .checkbox { width: 16px; text-align: center; font-size: 15px; color: var(--muted); }
   .checkbox.checked { color: var(--accent); }
+  .app-list li > .app-name-wrap { flex-grow: 1; min-width: 0; }
+  .app-launch-btn { flex-shrink: 0; font-size: 11.5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--chip-bg); color: var(--fg); cursor: pointer; }
+  .app-launch-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .app-launch-btn:disabled { opacity: .5; cursor: default; }
   .backlink { cursor: pointer; color: var(--accent); margin-bottom: 8px; display: inline-block; font-weight: 600; font-size: 13px; }
   .backlink:hover { text-decoration: underline; }
   .lang-switch { display: flex; gap: 4px; }
@@ -454,6 +458,7 @@ var I18N = {
     dropNotConf: 'Not a .conf file: %s',
     dropOverwriteConfirm: 'Profile "%s" already exists — overwrite it with the dropped file?',
     dropReadError: 'Could not read the dropped file.',
+    appsLaunch: 'Launch',
     hotkey: 'Hotkey', hotkeyNotSet: 'Not set', hotkeyPress: 'Press keys… (Esc to cancel)',
     hotkeyClear: 'Clear', hotkeyNeedsModifier: 'Hotkey needs at least one modifier key (Ctrl/Alt/Shift) plus a letter, digit, or F-key.',
     themeCustomColors: 'Custom colors (full RGB)', themeBackground: 'Background photo',
@@ -490,6 +495,7 @@ var I18N = {
     dropNotConf: 'Не .conf файл: %s',
     dropOverwriteConfirm: 'Профиль «%s» уже существует — перезаписать перетащенным файлом?',
     dropReadError: 'Не удалось прочитать перетащенный файл.',
+    appsLaunch: 'Запустить',
     hotkey: 'Горячая клавиша', hotkeyNotSet: 'Не задано', hotkeyPress: 'Нажмите комбинацию… (Esc — отмена)',
     hotkeyClear: 'Очистить', hotkeyNeedsModifier: 'Нужен хотя бы один модификатор (Ctrl/Alt/Shift) плюс буква, цифра или F-клавиша.',
     themeCustomColors: 'Свои цвета (вся RGB-палитра)', themeBackground: 'Фоновое фото',
@@ -1142,12 +1148,31 @@ function renderAppsList() {
       icon.height = 20;
       loadAppIcon(a.Path, icon);
       var text = document.createElement('span');
+      text.className = 'app-name-wrap';
       text.innerHTML = '<div class="app-name"></div><div class="app-path"></div>';
       text.querySelector('.app-name').textContent = a.Name;
       text.querySelector('.app-path').textContent = a.Path;
       li.appendChild(cb);
       li.appendChild(icon);
       li.appendChild(text);
+      // launchApp only exists on Linux (Windows matches an already-running
+      // process's live traffic instead — there's nothing to "launch") —
+      // feature-detected so this button simply doesn't render on Windows
+      // rather than calling a binding that isn't there.
+      if (window.launchApp) {
+        var launchBtn = document.createElement('button');
+        launchBtn.type = 'button';
+        launchBtn.className = 'app-launch-btn';
+        launchBtn.textContent = t('appsLaunch');
+        launchBtn.onclick = function(e) {
+          e.stopPropagation(); // don't also toggle the checkbox
+          launchBtn.disabled = true;
+          window.launchApp(a.Path).catch(function(err) {
+            showListError(err);
+          }).finally(function() { launchBtn.disabled = false; });
+        };
+        li.appendChild(launchBtn);
+      }
       li.onclick = function() { toggleApp(a.Path); };
       ul.appendChild(li);
     });

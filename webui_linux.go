@@ -242,6 +242,37 @@ func bindAPI(w webview.WebView) {
 		return out, nil
 	}))
 
+	// launchApp is the button webui_html.go's Apps view renders per row
+	// (feature-detected there via `if (window.launchApp)`, since Windows
+	// has no such binding at all — it matches an already-running
+	// process's live traffic instead of launching a fresh one). This was
+	// missing entirely until 2026-09-09: LaunchApp existed and worked
+	// server-side (exercised plenty over the CLI), but nothing in the GUI
+	// ever called it — clicking an app row only toggled its checkbox.
+	// Confirmed live: a user report of "routing doesn't work" traced back
+	// to checking their own already-running, completely unrelated browser
+	// window, because the "Apps" view had never actually launched
+	// anything in the first place.
+	must(w.Bind("launchApp", func(desktopID string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		req := LaunchAppRequest{
+			DesktopID: desktopID,
+			Env: map[string]string{
+				"DISPLAY":                  os.Getenv("DISPLAY"),
+				"WAYLAND_DISPLAY":          os.Getenv("WAYLAND_DISPLAY"),
+				"XDG_RUNTIME_DIR":          os.Getenv("XDG_RUNTIME_DIR"),
+				"DBUS_SESSION_BUS_ADDRESS": os.Getenv("DBUS_SESSION_BUS_ADDRESS"),
+				"_CALLER_UID":              fmt.Sprint(os.Getuid()),
+				"_CALLER_GID":              fmt.Sprint(os.Getgid()),
+			},
+		}
+		return client.Call("Bridge.LaunchApp", req, &struct{}{})
+	}))
+
 	must(w.Bind("getAppIcon", func(path string) (string, error) {
 		client, err := ipcDial()
 		if err != nil {
