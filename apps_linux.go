@@ -305,10 +305,20 @@ func resolveAppBinaries(desktopIDs []string) []string {
 // (target + "-") catches that pattern, which is common enough (Chrome,
 // Firefox, most Electron apps) to be worth a dedicated check rather than
 // requiring an exact basename match.
+//
+// Case-insensitive: confirmed live 2026-09-09 that Discord's .desktop
+// Exec= is the lowercase wrapper script "/usr/bin/discord", but the real
+// Electron binary it execs into is "/home/.../app-<ver>/Discord" (capital
+// D) — an exact-case comparison never matched, so Discord was silently
+// never added to the tunnel's cgroup despite being "included."
 func matchingPIDs(targets []string) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
+	}
+	lowerTargets := make([]string, len(targets))
+	for i, t := range targets {
+		lowerTargets[i] = strings.ToLower(t)
 	}
 	var pids []int
 	for _, e := range entries {
@@ -320,8 +330,8 @@ func matchingPIDs(targets []string) []int {
 		if err != nil {
 			continue // permission denied (not ours/not readable) or already gone
 		}
-		base := filepath.Base(exe)
-		for _, t := range targets {
+		base := strings.ToLower(filepath.Base(exe))
+		for _, t := range lowerTargets {
 			if base == t || strings.HasPrefix(base, t+"-") {
 				pids = append(pids, pid)
 				break
