@@ -186,10 +186,6 @@ const webUIHTML = `<!DOCTYPE html>
   }
   .included-app-icon:not([src]) { visibility: hidden; }
   .included-apps-fulltunnel { color: var(--muted); font-size: 12px; }
-  .theme-panel {
-    background: var(--chip-bg); border: 1px solid var(--border); border-radius: 9px;
-    padding: 10px; margin: -6px -4px 14px;
-  }
   .theme-panel-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .theme-panel-row + .theme-panel-row { margin-top: 9px; }
   .theme-panel-label { color: var(--muted); font-size: 11px; width: 100%; }
@@ -217,15 +213,16 @@ const webUIHTML = `<!DOCTYPE html>
      photo/window-size combination. */
   body.has-bg-image { background-size: var(--bg-fit, contain); background-position: center; background-repeat: no-repeat; background-attachment: fixed; }
   body.has-bg-image .card { background: color-mix(in srgb, var(--card) 20%, transparent); backdrop-filter: blur(8px); }
-  /* The card going translucent left its own children — the list boxes,
-     the theme panel — still fully opaque with their normal solid dark
-     background, which then looked like solid black rectangles floating
-     over the now much-more-visible photo (found live 2026-09-04). Same
-     translucent treatment here, just without re-blurring what the card's
-     own backdrop-filter already blurred. */
+  /* The card going translucent left its own children — the list boxes —
+     still fully opaque with their normal solid dark background, which
+     then looked like solid black rectangles floating over the now much-
+     more-visible photo (found live 2026-09-04). Same translucent
+     treatment here, just without re-blurring what the card's own
+     backdrop-filter already blurred. Settings is its own modal over a
+     dark backdrop now, not a child of .card, so it's excluded — same
+     opaque treatment confirm-box/prompt-box already get. */
   body.has-bg-image .profile-list,
-  body.has-bg-image .app-list,
-  body.has-bg-image .theme-panel {
+  body.has-bg-image .app-list {
     background: color-mix(in srgb, var(--chip-bg) 45%, transparent);
   }
   body.has-bg-image .profile-list li:hover,
@@ -260,6 +257,10 @@ const webUIHTML = `<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--border); border-radius: 12px;
     padding: 18px 20px; max-width: 320px; box-shadow: var(--shadow);
   }
+  .settings-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; width: 380px; max-width: 90vw; box-shadow: var(--shadow);
+  }
   .confirm-message { font-size: 13.5px; line-height: 1.5; }
   button.primary.danger { background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); }
 </style>
@@ -288,43 +289,59 @@ const webUIHTML = `<!DOCTYPE html>
     <span class="brand-title">Spectrune</span>
   </div>
   <div class="topbar-actions">
-    <button id="theme-toggle-btn" class="icon-btn" title="Theme">🎨</button>
-    <div class="lang-switch">
-      <button id="lang-en">EN</button>
-      <button id="lang-ru">RU</button>
-    </div>
+    <button id="settings-toggle-btn" class="icon-btn" title="Settings">⚙️</button>
   </div>
 </div>
 
-<div id="theme-panel" class="theme-panel" style="display:none">
-  <div class="theme-panel-row">
-    <span class="theme-panel-label" data-i18n="themeMode">Mode</span>
-    <button id="theme-mode-dark" class="theme-mode-btn" data-i18n="themeDark">Dark</button>
-    <button id="theme-mode-light" class="theme-mode-btn" data-i18n="themeLight">Light</button>
-  </div>
-  <div class="theme-panel-row">
-    <span class="theme-panel-label" data-i18n="themeAccent">Accent color</span>
-    <button class="theme-swatch" data-accent="violet" style="background:linear-gradient(135deg,#7a5cff,#ff3ea5)"></button>
-    <button class="theme-swatch" data-accent="ocean" style="background:linear-gradient(135deg,#00c2ff,#2f6bff)"></button>
-    <button class="theme-swatch" data-accent="emerald" style="background:linear-gradient(135deg,#00e5b0,#12b76a)"></button>
-    <button class="theme-swatch" data-accent="sunset" style="background:linear-gradient(135deg,#ffb347,#ff5f6d)"></button>
-    <button class="theme-swatch" data-accent="crimson" style="background:linear-gradient(135deg,#ff5c8a,#c2185b)"></button>
-    <button class="theme-swatch" data-accent="slate" style="background:linear-gradient(135deg,#8a8fa3,#545a70)"></button>
-  </div>
-  <div class="theme-panel-row">
-    <span class="theme-panel-label" data-i18n="themeCustomColors">Custom colors (full RGB)</span>
-    <input type="color" id="theme-custom-color1" value="#7a5cff">
-    <input type="color" id="theme-custom-color2" value="#ff3ea5">
-  </div>
-  <div class="theme-panel-row">
-    <span class="theme-panel-label" data-i18n="themeBackground">Background photo</span>
-    <button id="btn-choose-bg" data-i18n="themeChooseBg">Choose photo…</button>
-    <button id="btn-clear-bg" data-i18n="themeClearBg">Clear</button>
-  </div>
-  <div class="theme-panel-row" id="theme-bg-fit-row" style="display:none">
-    <span class="theme-panel-label" data-i18n="themeBgFit">Fit</span>
-    <button id="theme-bg-fit-contain" class="theme-mode-btn" data-i18n="themeBgFitContain">Whole photo</button>
-    <button id="theme-bg-fit-cover" class="theme-mode-btn" data-i18n="themeBgFitCover">Fill (crop)</button>
+<div id="settings-overlay" class="confirm-overlay" style="display:none">
+  <div class="settings-box">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
+      <h2 style="margin:0;font-size:15px" data-i18n="settingsTitle">Settings</h2>
+      <span class="backlink" id="settings-close" style="margin:0">✕</span>
+    </div>
+    <div class="theme-panel-row">
+      <span class="theme-panel-label" data-i18n="settingsLanguage">Language</span>
+      <div class="lang-switch">
+        <button id="lang-en">EN</button>
+        <button id="lang-ru">RU</button>
+      </div>
+    </div>
+    <div class="theme-panel-row" id="settings-autostart-row" style="display:none;justify-content:space-between">
+      <span data-i18n="settingsAutostart" style="width:auto">Launch on Windows startup</span>
+      <label class="switch">
+        <input type="checkbox" id="settings-autostart-toggle">
+        <span class="switch-slider"></span>
+      </label>
+    </div>
+    <div class="theme-panel-row">
+      <span class="theme-panel-label" data-i18n="themeMode">Mode</span>
+      <button id="theme-mode-dark" class="theme-mode-btn" data-i18n="themeDark">Dark</button>
+      <button id="theme-mode-light" class="theme-mode-btn" data-i18n="themeLight">Light</button>
+    </div>
+    <div class="theme-panel-row">
+      <span class="theme-panel-label" data-i18n="themeAccent">Accent color</span>
+      <button class="theme-swatch" data-accent="violet" style="background:linear-gradient(135deg,#7a5cff,#ff3ea5)"></button>
+      <button class="theme-swatch" data-accent="ocean" style="background:linear-gradient(135deg,#00c2ff,#2f6bff)"></button>
+      <button class="theme-swatch" data-accent="emerald" style="background:linear-gradient(135deg,#00e5b0,#12b76a)"></button>
+      <button class="theme-swatch" data-accent="sunset" style="background:linear-gradient(135deg,#ffb347,#ff5f6d)"></button>
+      <button class="theme-swatch" data-accent="crimson" style="background:linear-gradient(135deg,#ff5c8a,#c2185b)"></button>
+      <button class="theme-swatch" data-accent="slate" style="background:linear-gradient(135deg,#8a8fa3,#545a70)"></button>
+    </div>
+    <div class="theme-panel-row">
+      <span class="theme-panel-label" data-i18n="themeCustomColors">Custom colors (full RGB)</span>
+      <input type="color" id="theme-custom-color1" value="#7a5cff">
+      <input type="color" id="theme-custom-color2" value="#ff3ea5">
+    </div>
+    <div class="theme-panel-row">
+      <span class="theme-panel-label" data-i18n="themeBackground">Background photo</span>
+      <button id="btn-choose-bg" data-i18n="themeChooseBg">Choose photo…</button>
+      <button id="btn-clear-bg" data-i18n="themeClearBg">Clear</button>
+    </div>
+    <div class="theme-panel-row" id="theme-bg-fit-row" style="display:none">
+      <span class="theme-panel-label" data-i18n="themeBgFit">Fit</span>
+      <button id="theme-bg-fit-contain" class="theme-mode-btn" data-i18n="themeBgFitContain">Whole photo</button>
+      <button id="theme-bg-fit-cover" class="theme-mode-btn" data-i18n="themeBgFitCover">Fill (crop)</button>
+    </div>
   </div>
 </div>
 
@@ -470,6 +487,8 @@ var I18N = {
     selectAll: 'Select all', clearSelection: 'Clear selection',
     routedApps: 'Routed through the tunnel:',
     noAppsFullTunnel: 'Nothing selected — all traffic goes through the VPN.',
+    settingsTitle: 'Settings', settingsLanguage: 'Language',
+    settingsAutostart: 'Launch on Windows startup',
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
     presetLoad: 'Load', presetSaveAs: 'Save as…', presetDelete: 'Delete',
@@ -512,6 +531,8 @@ var I18N = {
     selectAll: 'Выбрать все', clearSelection: 'Очистить выбор',
     routedApps: 'Маршрутизируются через туннель:',
     noAppsFullTunnel: 'Ничего не выбрано — весь трафик идёт через VPN.',
+    settingsTitle: 'Настройки', settingsLanguage: 'Язык',
+    settingsAutostart: 'Запускать при старте Windows',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
     presetLoad: 'Загрузить', presetSaveAs: 'Сохранить как…', presetDelete: 'Удалить',
@@ -1536,11 +1557,34 @@ function setThemeCustomColors() {
   applyTheme();
 }
 
-$('theme-toggle-btn').onclick = function() {
-  var panel = $('theme-panel');
-  var open = panel.style.display !== 'none';
-  panel.style.display = open ? 'none' : 'block';
-  $('theme-toggle-btn').classList.toggle('active', !open);
+function openSettings() {
+  $('settings-overlay').style.display = 'flex';
+  $('settings-toggle-btn').classList.add('active');
+  // getAutostartEnabled only exists on Windows (autostart_windows.go) —
+  // the daemon already starts itself on Linux via systemd, this toggle
+  // is purely about the GUI/tray front-end reappearing after login.
+  if (window.getAutostartEnabled) {
+    $('settings-autostart-row').style.display = 'flex';
+    getAutostartEnabled().then(function(enabled) {
+      $('settings-autostart-toggle').checked = enabled;
+    }).catch(function() { /* best-effort — leave it unchecked */ });
+  }
+}
+function closeSettings() {
+  $('settings-overlay').style.display = 'none';
+  $('settings-toggle-btn').classList.remove('active');
+}
+$('settings-toggle-btn').onclick = openSettings;
+$('settings-close').onclick = closeSettings;
+$('settings-overlay').addEventListener('click', function(e) {
+  if (e.target === $('settings-overlay')) closeSettings();
+});
+$('settings-autostart-toggle').onchange = function() {
+  var checked = $('settings-autostart-toggle').checked;
+  setAutostartEnabled(checked).catch(function(err) {
+    $('settings-autostart-toggle').checked = !checked; // revert on failure
+    showListError(err);
+  });
 };
 $('theme-mode-dark').onclick = function() { setThemeMode('dark'); };
 $('theme-mode-light').onclick = function() { setThemeMode('light'); };
