@@ -30,10 +30,11 @@ const guiWindowTitle = "Spectrune"
 // ProfileDetails mirrors webui_windows.go's — same JSON shape the shared
 // webUIHTML JS already expects.
 type ProfileDetails struct {
-	ConfigText   string
-	IncludedApps []string
-	AutoConnect  bool
-	Hotkey       string
+	ConfigText          string
+	IncludedApps        []string
+	IncludedDomainLists []string
+	AutoConnect         bool
+	Hotkey              string
 }
 
 // installedApp mirrors installedapps_windows.go's shape ({Name, Path}) —
@@ -142,14 +143,15 @@ func bindAPI(w webview.WebView) {
 			return nil, err
 		}
 		return &ProfileDetails{
-			ConfigText:   cfg.ToWgQuick(),
-			IncludedApps: cfg.IncludedApps,
-			AutoConnect:  cfg.AutoConnect,
-			Hotkey:       cfg.Hotkey,
+			ConfigText:          cfg.ToWgQuick(),
+			IncludedApps:        cfg.IncludedApps,
+			IncludedDomainLists: cfg.IncludedDomainLists,
+			AutoConnect:         cfg.AutoConnect,
+			Hotkey:              cfg.Hotkey,
 		}, nil
 	}))
 
-	must(w.Bind("saveProfile", func(name, wgQuickText string, includedApps []string, autoConnect bool, hotkey string) error {
+	must(w.Bind("saveProfile", func(name, wgQuickText string, includedApps []string, includedDomainLists []string, autoConnect bool, hotkey string) error {
 		if !profileNameIsValid(name) {
 			return fmt.Errorf("profile name %q is not valid", name)
 		}
@@ -158,6 +160,7 @@ func bindAPI(w webview.WebView) {
 			return err
 		}
 		cfg.IncludedApps = includedApps
+		cfg.IncludedDomainLists = includedDomainLists
 		cfg.AutoConnect = autoConnect
 		cfg.Hotkey = hotkey
 		client, err := ipcDial()
@@ -347,6 +350,53 @@ func bindAPI(w webview.WebView) {
 		}
 		defer client.Close()
 		return client.Call("Bridge.DeleteAppPreset", name, &struct{}{})
+	}))
+
+	must(w.Bind("listDomainLists", func() ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var names []string
+		if err := client.Call("Bridge.ListDomainLists", struct{}{}, &names); err != nil {
+			return nil, err
+		}
+		return names, nil
+	}))
+
+	must(w.Bind("saveDomainList", func(name string, domains []string) error {
+		if !profileNameIsValid(name) {
+			return fmt.Errorf("domain list name %q is not valid", name)
+		}
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.SaveDomainList", DomainListSaveRequest{Name: name, Domains: domains}, &struct{}{})
+	}))
+
+	must(w.Bind("loadDomainList", func(name string) ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var domains []string
+		if err := client.Call("Bridge.LoadDomainList", name, &domains); err != nil {
+			return nil, err
+		}
+		return domains, nil
+	}))
+
+	must(w.Bind("deleteDomainList", func(name string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.DeleteDomainList", name, &struct{}{})
 	}))
 
 	must(w.Bind("importConfig", func() (string, error) {

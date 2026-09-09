@@ -61,7 +61,8 @@ const (
 // public shape (Start/Stop/HandshakeOK) as the netns-based version it
 // replaces, so service_linux.go didn't need to change.
 type LinuxBridge struct {
-	dev *device.Device
+	dev     *device.Device
+	sniffer *domainSniffer
 
 	mu           sync.Mutex
 	includedApps []string // binary basenames/paths resolved from the profile's IncludedApps desktop IDs
@@ -87,10 +88,12 @@ func runCmdIgnoreErr(name string, args ...string) {
 // Start() in case a previous run didn't shut down cleanly.
 func teardownRouting() {
 	runCmdIgnoreErr("iptables", "-t", "mangle", "-D", "OUTPUT", "-m", "cgroup", "--path", cgroupRelDir, "-j", "MARK", "--set-mark", fwMark)
+	runCmdIgnoreErr("iptables", "-t", "mangle", "-D", "OUTPUT", "-m", "set", "--match-set", domainSetName, "dst", "-j", "MARK", "--set-mark", fwMark)
 	runCmdIgnoreErr("iptables", "-t", "nat", "-D", "POSTROUTING", "-o", tunName, "-j", "MASQUERADE")
 	runCmdIgnoreErr("ip", "rule", "del", "fwmark", fwMark, "table", routeTable)
 	runCmdIgnoreErr("ip", "route", "flush", "table", routeTable)
 	runCmdIgnoreErr("ip", "link", "del", tunName)
+	runCmdIgnoreErr("ipset", "destroy", domainSetName)
 	os.RemoveAll(cgroupRoot)
 }
 
@@ -123,6 +126,9 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 
 	if err := os.MkdirAll(cgroupRoot, 0o755); err != nil {
 		return fmt.Errorf("MkdirAll %s: %w", cgroupRoot, err)
+	}
+	if err := runCmd("ipset", "create", domainSetName, "hash:ip", "-exist"); err != nil {
+		return fmt.Errorf("ipset create: %w", err)
 	}
 
 	tdev, err := tun.CreateTUN(tunName, device.DefaultMTU)
@@ -162,6 +168,11 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 		// check). MASQUERADE rewrites the source to the tunnel's own
 		// address as the packet leaves via spectrune0.
 		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-o", tunName, "-j", "MASQUERADE"},
+		// Domain-based routing (dnssniff_linux.go): any packet whose
+		// destination IP was resolved from a watched domain gets the same
+		// mark, regardless of which process sent it — there's no cgroup
+		// for "traffic to a domain" the way there is for an app.
+		{"iptables", "-t", "mangle", "-A", "OUTPUT", "-m", "set", "--match-set", domainSetName, "dst", "-j", "MARK", "--set-mark", fwMark},
 	}
 	for _, s := range steps {
 		if err := runCmd(s[0], s[1:]...); err != nil {
@@ -177,6 +188,14 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	b.mu.Unlock()
 	go b.matchLoop(stopCh)
 
+	sniffer := newDomainSniffer()
+	sniffer.setDomains(resolveDomainLists(cfg.IncludedDomainLists))
+	if err := sniffer.start(); err != nil {
+		log.Printf("domainSniffer.start: %v (domain-based routing unavailable this session)", err)
+	} else {
+		b.sniffer = sniffer
+	}
+
 	log.Printf("Spectrune routing up (cgroup %s, fwmark %s), tunnel to %s", cgroupRoot, fwMark, cfg.Endpoint)
 	return nil
 }
@@ -191,6 +210,10 @@ func (b *LinuxBridge) Stop() {
 	}
 	b.mu.Unlock()
 
+	if b.sniffer != nil {
+		b.sniffer.close()
+		b.sniffer = nil
+	}
 	if b.dev != nil {
 		b.dev.Close()
 		b.dev = nil
@@ -205,6 +228,14 @@ func (b *LinuxBridge) UpdateIncludedApps(apps []string) {
 	b.mu.Lock()
 	b.includedApps = resolveAppBinaries(apps)
 	b.mu.Unlock()
+}
+
+// UpdateIncludedDomainLists swaps which domain lists are enabled without
+// a reconnect — same reasoning as UpdateIncludedApps.
+func (b *LinuxBridge) UpdateIncludedDomainLists(listNames []string) {
+	if b.sniffer != nil {
+		b.sniffer.setDomains(resolveDomainLists(listNames))
+	}
 }
 
 // matchLoop periodically scans /proc for already-running processes that

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -35,6 +36,10 @@ commands:
   /deleteprofile NAME           delete a saved profile
   /listapps                    list installed .desktop applications
   /launchapp DESKTOP_ID         launch an app inside the tunnel's namespace
+  /listdomainlists             list saved domain list names
+  /savedomainlist NAME DOMAINS   save a domain list (DOMAINS is comma-separated)
+  /loaddomainlist NAME          print a domain list's domains
+  /deletedomainlist NAME        delete a domain list
   /gui                         open the GUI window`)
 }
 
@@ -133,6 +138,43 @@ func dispatch(cmd string, args []string) bool {
 		}
 		fatalIf(client.Call("Bridge.LaunchApp", req, &struct{}{}))
 		fmt.Printf("launched: %s\n", args[0])
+	case "/listdomainlists":
+		client, err := ipcDial()
+		fatalIf(err)
+		defer client.Close()
+		var reply []string
+		fatalIf(client.Call("Bridge.ListDomainLists", struct{}{}, &reply))
+		for _, name := range reply {
+			fmt.Println(name)
+		}
+	case "/savedomainlist":
+		requireArgs(args, 2, "/savedomainlist NAME DOMAINS")
+		client, err := ipcDial()
+		fatalIf(err)
+		defer client.Close()
+		domains := strings.Split(args[1], ",")
+		for i := range domains {
+			domains[i] = strings.TrimSpace(domains[i])
+		}
+		fatalIf(client.Call("Bridge.SaveDomainList", DomainListSaveRequest{Name: args[0], Domains: domains}, &struct{}{}))
+		fmt.Printf("saved domain list: %s\n", args[0])
+	case "/loaddomainlist":
+		requireArgs(args, 1, "/loaddomainlist NAME")
+		client, err := ipcDial()
+		fatalIf(err)
+		defer client.Close()
+		var domains []string
+		fatalIf(client.Call("Bridge.LoadDomainList", args[0], &domains))
+		for _, d := range domains {
+			fmt.Println(d)
+		}
+	case "/deletedomainlist":
+		requireArgs(args, 1, "/deletedomainlist NAME")
+		client, err := ipcDial()
+		fatalIf(err)
+		defer client.Close()
+		fatalIf(client.Call("Bridge.DeleteDomainList", args[0], &struct{}{}))
+		fmt.Printf("deleted domain list: %s\n", args[0])
 	case "/gui":
 		runGUI()
 	default:

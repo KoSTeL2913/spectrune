@@ -91,8 +91,15 @@ func setWindowIconFromResource(hwnd uintptr) {
 type ProfileDetails struct {
 	ConfigText   string
 	IncludedApps []string
-	AutoConnect  bool
-	Hotkey       string
+	// IncludedDomainLists always comes back empty here — domain-list
+	// routing (domainlists_linux.go) is a Linux-only feature, built on
+	// cgroup/ipset mechanisms Windows' WFP-based per-app interception
+	// doesn't have an equivalent of. Kept on this struct only so the
+	// shared webui_html.go JS (which reads/writes this field
+	// unconditionally) doesn't need an OS feature-detect for it.
+	IncludedDomainLists []string
+	AutoConnect         bool
+	Hotkey              string
 }
 
 // hideConsoleWindow hides this process's own console window. Spectrune
@@ -299,7 +306,10 @@ func bindAPI(w webview2.WebView) {
 		}, nil
 	}))
 
-	must(w.Bind("saveProfile", func(name, wgQuickText string, includedApps []string, autoConnect bool, hotkey string) error {
+	// includedDomainLists is accepted (to match the shared webui_html.go
+	// JS's call signature) and discarded — see ProfileDetails' doc comment
+	// above on why this feature has no Windows equivalent.
+	must(w.Bind("saveProfile", func(name, wgQuickText string, includedApps []string, includedDomainLists []string, autoConnect bool, hotkey string) error {
 		if !profileNameIsValid(name) {
 			return fmt.Errorf("profile name %q is not valid", name)
 		}

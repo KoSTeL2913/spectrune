@@ -335,6 +335,7 @@ const webUIHTML = `<!DOCTYPE html>
     <button id="btn-add" data-i18n="add">Add…</button>
     <button id="btn-edit" disabled data-i18n="edit">Edit…</button>
     <button id="btn-apps" disabled data-i18n="apps">Apps…</button>
+    <button id="btn-domains" disabled data-i18n="domains">Domains…</button>
     <button id="btn-delete" disabled data-i18n="delete">Delete</button>
   </div>
   <div class="status-row">
@@ -371,6 +372,7 @@ const webUIHTML = `<!DOCTYPE html>
   <textarea id="edit-config" class="flex-grow" spellcheck="false"></textarea>
   <div class="row" style="margin-top:10px">
     <button id="btn-open-apps">Apps: 0 selected…</button>
+    <button id="btn-open-domains">Domains: 0 enabled…</button>
   </div>
   <div class="row">
     <button id="btn-save" class="primary" data-i18n="save">Save</button>
@@ -396,6 +398,27 @@ const webUIHTML = `<!DOCTYPE html>
   <ul id="apps-list" class="app-list flex-grow"></ul>
   <div class="row">
     <button id="btn-browse-app" data-i18n="add">Add…</button>
+  </div>
+</div>
+
+<div id="view-domains" class="view">
+  <span class="backlink" id="domains-back" data-i18n="done">&larr; Done</span>
+  <h1 data-i18n="domainLists">Domain lists</h1>
+  <p class="hint" data-i18n="domainsHint">Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list's domains with "Edit".</p>
+  <ul id="domains-list" class="app-list flex-grow"></ul>
+  <div class="row">
+    <button id="btn-new-domain-list" data-i18n="domainsNewList">+ New list…</button>
+  </div>
+</div>
+
+<div id="view-domain-edit" class="view">
+  <span class="backlink" id="domain-edit-back" data-i18n="back">&larr; Back</span>
+  <h1 id="domain-edit-title"></h1>
+  <p class="hint" data-i18n="domainEditHint">One domain per line (e.g. discord.com) — subdomains are matched automatically.</p>
+  <textarea id="domain-edit-text" class="flex-grow" spellcheck="false"></textarea>
+  <div class="row">
+    <button id="btn-domain-edit-save" class="primary" data-i18n="save">Save</button>
+    <button id="btn-domain-edit-cancel" data-i18n="cancel">Cancel</button>
   </div>
 </div>
 
@@ -429,7 +452,7 @@ const webUIHTML = `<!DOCTYPE html>
 
 var I18N = {
   en: {
-    add: 'Add…', edit: 'Edit…', apps: 'Apps…', delete: 'Delete',
+    add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
     checkingStatus: 'Checking status…', connected: 'Connected: %s', disconnected: 'Disconnected',
     connecting: 'Connecting to %s…',
     connectedShort: 'Connected', connectingShort: 'Connecting…',
@@ -464,9 +487,14 @@ var I18N = {
     themeCustomColors: 'Custom colors (full RGB)', themeBackground: 'Background photo',
     themeChooseBg: 'Choose photo…', themeClearBg: 'Clear',
     themeBgFit: 'Fit', themeBgFitContain: 'Whole photo', themeBgFitCover: 'Fill (crop)',
+    domainsSelected: 'Domains: %d enabled…', domainLists: 'Domain lists',
+    domainsHint: 'Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list\'s domains with "Edit".',
+    domainsNewList: '+ New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
+    domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
+    domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "+ New list…" to create one.',
   },
   ru: {
-    add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', delete: 'Удалить',
+    add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
     checkingStatus: 'Проверка статуса…', connected: 'Подключено: %s', disconnected: 'Отключено',
     connecting: 'Подключение к %s…',
     connectedShort: 'Подключено', connectingShort: 'Подключение…',
@@ -501,6 +529,11 @@ var I18N = {
     themeCustomColors: 'Свои цвета (вся RGB-палитра)', themeBackground: 'Фоновое фото',
     themeChooseBg: 'Выбрать фото…', themeClearBg: 'Очистить',
     themeBgFit: 'Заполнение', themeBgFitContain: 'Целиком', themeBgFitCover: 'На весь экран (обрезка)',
+    domainsSelected: 'Домены: включено %d…', domainLists: 'Списки доменов',
+    domainsHint: 'Включите список, чтобы направить все его домены через этот туннель — независимо от того, какое приложение к ним обращается. Кнопка «Изменить» редактирует домены списка.',
+    domainsNewList: '+ Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
+    domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
+    domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «+ Новый список…», чтобы создать.',
   },
 };
 
@@ -521,6 +554,9 @@ var state = {
   includedApps: [],   // lowercase path -> path, preserved case
   appsFilter: '',
   appPresets: [],
+  includedDomainLists: [], // names of domain lists enabled for this profile
+  domainLists: [],         // every saved domain list's name
+  editingDomainList: null, // name of the domain list open in view-domain-edit
   editHotkey: '',
   editOriginalName: null,
   lang: (function() { try { return localStorage.getItem('lang') || 'en'; } catch (e) { return 'en'; } })(),
@@ -622,6 +658,7 @@ function updateButtons() {
   var has = state.selected !== null;
   $('btn-edit').disabled = !has;
   $('btn-apps').disabled = !has;
+  $('btn-domains').disabled = !has;
   $('btn-delete').disabled = !has;
   $('btn-connect').disabled = !has && !state.connected;
   if (state.connected && state.handshakeOK) {
@@ -878,7 +915,11 @@ function showPrompt(message, defaultValue, onOk) {
 }
 $('btn-apps').onclick = function() {
   if (!state.selected) return;
-  openEdit(state.selected, true);
+  openEdit(state.selected, 'apps');
+};
+$('btn-domains').onclick = function() {
+  if (!state.selected) return;
+  openEdit(state.selected, 'domains');
 };
 $('btn-connect').onclick = function() {
   $('btn-connect').disabled = true;
@@ -890,11 +931,12 @@ $('btn-connect').onclick = function() {
 
 var editTemplate = "[Interface]\nPrivateKey = \nAddress = \nDNS = \n\n[Peer]\nPublicKey = \nEndpoint = \nAllowedIPs = 0.0.0.0/0\n";
 
-function openEdit(name, jumpToApps) {
+function openEdit(name, jumpTo) {
   $('edit-error').style.display = 'none';
   state.editingExisting = name !== null;
   state.editOriginalName = name; // null for Add, the pre-edit name for Edit — see saveCurrentProfile
   state.includedApps = [];
+  state.includedDomainLists = [];
   if (name === null) {
     $('edit-title').textContent = t('addProfile');
     $('edit-name').value = '';
@@ -903,7 +945,7 @@ function openEdit(name, jumpToApps) {
     $('edit-autoconnect').checked = false;
     state.editHotkey = '';
     renderHotkeyValue();
-    finishOpenEdit(jumpToApps);
+    finishOpenEdit(jumpTo);
   } else {
     $('edit-title').textContent = t('editProfile');
     // Editable, not disabled — renaming a profile is just "Save" with a
@@ -914,18 +956,21 @@ function openEdit(name, jumpToApps) {
       $('edit-name').value = name;
       $('edit-config').value = details.ConfigText;
       state.includedApps = details.IncludedApps || [];
+      state.includedDomainLists = details.IncludedDomainLists || [];
       $('edit-autoconnect').checked = !!details.AutoConnect;
       state.editHotkey = details.Hotkey || '';
       renderHotkeyValue();
-      finishOpenEdit(jumpToApps);
+      finishOpenEdit(jumpTo);
     }).catch(function(err) { showListError(err); });
   }
 }
 
-function finishOpenEdit(jumpToApps) {
+function finishOpenEdit(jumpTo) {
   updateAppsCount();
+  updateDomainsCount();
   show('view-edit');
-  if (jumpToApps) openAppsPicker();
+  if (jumpTo === 'apps') openAppsPicker();
+  else if (jumpTo === 'domains') openDomainsPicker();
 }
 
 // ---------- hotkey capture ----------
@@ -996,6 +1041,7 @@ $('btn-hotkey-clear').onclick = function() {
 $('edit-back').onclick = function() { stopHotkeyCapture(); show('view-list'); };
 $('btn-cancel').onclick = function() { stopHotkeyCapture(); show('view-list'); };
 $('btn-open-apps').onclick = function() { stopHotkeyCapture(); openAppsPicker(); };
+$('btn-open-domains').onclick = function() { stopHotkeyCapture(); openDomainsPicker(); };
 $('btn-import').onclick = function() {
   importConfig().then(function(text) {
     if (text) $('edit-config').value = text;
@@ -1014,7 +1060,7 @@ function saveCurrentProfile() {
   if (!name) { return Promise.reject(t('nameRequired')); }
   var oldName = state.editOriginalName;
   var doSave = function() {
-    return saveProfile(name, $('edit-config').value, state.includedApps, $('edit-autoconnect').checked, state.editHotkey).then(function() {
+    return saveProfile(name, $('edit-config').value, state.includedApps, state.includedDomainLists, $('edit-autoconnect').checked, state.editHotkey).then(function() {
       delete includedPreviewCache[name];
       if (oldName && oldName !== name) delete includedPreviewCache[oldName];
     });
@@ -1233,6 +1279,141 @@ $('btn-browse-app').onclick = function() {
   }).catch(showEditError);
 };
 
+// ---------- domain lists picker view ----------
+// Named, reusable domain lists (domainlists_linux.go on the Go side) —
+// unlike app presets (a one-time copy into includedApps), each list stays
+// a live, independently toggleable membership: state.includedDomainLists
+// holds just the *names* of the lists enabled for this profile, and the
+// lists themselves (their actual domains) are edited in one shared place
+// via view-domain-edit rather than duplicated per profile.
+
+function updateDomainsCount() { $('btn-open-domains').textContent = tf('domainsSelected', state.includedDomainLists.length); }
+
+function openDomainsPicker() {
+  show('view-domains');
+  refreshDomainLists();
+}
+
+function refreshDomainLists() {
+  listDomainLists().then(function(names) {
+    state.domainLists = names || [];
+    renderDomainsList();
+  }).catch(showEditError);
+}
+
+function renderDomainsList() {
+  var ul = $('domains-list');
+  ul.innerHTML = '';
+  if (state.domainLists.length === 0) {
+    var empty = document.createElement('li');
+    empty.textContent = t('domainListNoLists');
+    empty.style.cursor = 'default';
+    ul.appendChild(empty);
+    return;
+  }
+  var enabledSet = {};
+  state.includedDomainLists.forEach(function(n) { enabledSet[n] = true; });
+  state.domainLists.forEach(function(name) {
+    var li = document.createElement('li');
+    li.style.cursor = 'default';
+
+    var label = document.createElement('label');
+    label.className = 'switch';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!enabledSet[name];
+    cb.onchange = function() { toggleDomainList(name); };
+    var slider = document.createElement('span');
+    slider.className = 'switch-slider';
+    label.appendChild(cb);
+    label.appendChild(slider);
+
+    var text = document.createElement('span');
+    text.className = 'app-name-wrap';
+    text.textContent = name;
+
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'app-launch-btn';
+    editBtn.textContent = t('domainListEdit');
+    editBtn.onclick = function() { openDomainListEditor(name); };
+
+    var delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'app-launch-btn';
+    delBtn.textContent = t('delete');
+    delBtn.onclick = function() {
+      showConfirm(tf('domainListConfirmDelete', name), function() {
+        deleteDomainList(name).then(function() {
+          state.includedDomainLists = state.includedDomainLists.filter(function(n) { return n !== name; });
+          updateDomainsCount();
+          refreshDomainLists();
+        }).catch(showEditError);
+      });
+    };
+
+    li.appendChild(label);
+    li.appendChild(text);
+    li.appendChild(editBtn);
+    li.appendChild(delBtn);
+    ul.appendChild(li);
+  });
+}
+
+function toggleDomainList(name) {
+  var idx = state.includedDomainLists.indexOf(name);
+  if (idx === -1) {
+    state.includedDomainLists.push(name);
+  } else {
+    state.includedDomainLists.splice(idx, 1);
+  }
+  updateDomainsCount();
+}
+
+$('domains-back').onclick = function() {
+  // Same reasoning as apps-back: always save and return to the main
+  // list, regardless of how Domains was opened.
+  saveCurrentProfile().then(function() {
+    show('view-list');
+    refreshProfiles();
+  }).catch(function(err) { show('view-edit'); showEditError(err); });
+};
+
+$('btn-new-domain-list').onclick = function() {
+  showPrompt(t('domainListNamePrompt'), '', function(name) {
+    openDomainListEditor(name, true);
+  });
+};
+
+// ---------- domain list editor view ----------
+
+function openDomainListEditor(name, isNew) {
+  state.editingDomainList = name;
+  $('domain-edit-title').textContent = name;
+  $('domain-edit-text').value = '';
+  show('view-domain-edit');
+  if (isNew) return;
+  loadDomainList(name).then(function(domains) {
+    $('domain-edit-text').value = (domains || []).join('\n');
+  }).catch(function(err) { show('view-domains'); showEditError(err); });
+}
+
+$('btn-domain-edit-save').onclick = function() {
+  var name = state.editingDomainList;
+  var domains = $('domain-edit-text').value.split('\n')
+    .map(function(d) { return d.trim(); })
+    .filter(function(d) { return d !== ''; });
+  saveDomainList(name, domains).then(function() {
+    show('view-domains');
+    refreshDomainLists();
+  }).catch(showEditError);
+};
+
+$('btn-domain-edit-cancel').onclick = function() {
+  show('view-domains');
+  refreshDomainLists();
+};
+
 // ---------- language switching ----------
 
 function applyI18n() {
@@ -1249,8 +1430,10 @@ function applyI18n() {
   // data-i18n pass above only covers static markup.
   renderProfileList();
   updateAppsCount();
+  updateDomainsCount();
   renderHotkeyValue();
   if ($('view-apps').classList.contains('active')) renderAppsList();
+  if ($('view-domains').classList.contains('active')) renderDomainsList();
 }
 
 function setLang(lang) {
@@ -1383,6 +1566,11 @@ document.querySelectorAll('.theme-swatch').forEach(function(el) {
 });
 
 // ---------- startup ----------
+
+// Domain-list routing (ipset/iptables mangle) has no Windows equivalent —
+// window.listDomainLists simply isn't bound there. Hide the entry point
+// entirely rather than let it fail into a view with data it can't load.
+if (!window.listDomainLists) { $('btn-open-domains').style.display = 'none'; }
 
 applyTheme();
 applyI18n();

@@ -3,7 +3,7 @@ Version: 1.9.3.0
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libwebkit2gtk-4.1-0, libgtk-3-0, iproute2, util-linux, iptables
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0, iproute2, util-linux, iptables, ipset
 Recommends: zenity
 Maintainer: KoSTeL2913 <kostyas2913@gmail.com>
 Description: Per-application VPN routing over AmneziaWG/WireGuard

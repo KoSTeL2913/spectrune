@@ -43,6 +43,12 @@ type LinuxConfig struct {
 	IncludedApps []string
 	AutoConnect  bool
 	Hotkey       string // "Ctrl+Alt+F1" form, see hotkeys_linux.go
+
+	// IncludedDomainLists holds the *names* of enabled domain lists
+	// (domainlists_linux.go) — not domains directly, so the same named
+	// list (e.g. "тг") can be toggled on/off per profile and edited in
+	// one place rather than duplicated into every profile that uses it.
+	IncludedDomainLists []string
 }
 
 func b64ToHex(b64 string) (string, error) {
@@ -111,6 +117,12 @@ func ParseWgQuick(text, name string) (*LinuxConfig, error) {
 			for _, a := range strings.Split(val, ",") {
 				if a = strings.TrimSpace(a); a != "" {
 					cfg.IncludedApps = append(cfg.IncludedApps, a)
+				}
+			}
+		case section == "interface" && key == "domainlists":
+			for _, a := range strings.Split(val, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					cfg.IncludedDomainLists = append(cfg.IncludedDomainLists, a)
 				}
 			}
 		case section == "interface" && key == "autoconnect":
@@ -187,6 +199,9 @@ func (c *LinuxConfig) ToWgQuick() string {
 		if len(parts) == 2 {
 			fmt.Fprintf(&b, "%s = %s\n", strings.ToUpper(parts[0][:1])+parts[0][1:], parts[1])
 		}
+	}
+	if len(c.IncludedDomainLists) > 0 {
+		fmt.Fprintf(&b, "DomainLists = %s\n", strings.Join(c.IncludedDomainLists, ", "))
 	}
 	if len(c.IncludedApps) > 0 {
 		fmt.Fprintf(&b, "IncludedApps = %s\n", strings.Join(c.IncludedApps, ", "))

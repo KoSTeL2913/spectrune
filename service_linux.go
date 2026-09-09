@@ -103,6 +103,7 @@ func (s *Service) SaveProfile(cfg LinuxConfig, _ *struct{}) error {
 	s.mu.Unlock()
 	if isActive {
 		bridge.UpdateIncludedApps(cfg.IncludedApps)
+		bridge.UpdateIncludedDomainLists(cfg.IncludedDomainLists)
 	}
 	return nil
 }
@@ -167,6 +168,55 @@ func (s *Service) AppIconValue(desktopID string, reply *string) error {
 		}
 	}
 	return fmt.Errorf("no such app %q", desktopID)
+}
+
+func (s *Service) ListDomainLists(_ struct{}, reply *[]string) error {
+	names, err := listDomainListNames()
+	if err != nil {
+		return err
+	}
+	*reply = names
+	return nil
+}
+
+func (s *Service) SaveDomainList(req DomainListSaveRequest, _ *struct{}) error {
+	if err := saveDomainList(req.Name, req.Domains); err != nil {
+		return err
+	}
+	// Live-update any connected profile that has this list enabled —
+	// otherwise editing a list's own domains while it's already toggled
+	// on for the active profile wouldn't take effect until a reconnect.
+	s.mu.Lock()
+	bridge := s.bridge
+	name := s.activeProfile
+	s.mu.Unlock()
+	if bridge == nil {
+		return nil
+	}
+	cfg, err := loadProfile(name)
+	if err != nil {
+		return nil
+	}
+	for _, enabled := range cfg.IncludedDomainLists {
+		if enabled == req.Name {
+			bridge.UpdateIncludedDomainLists(cfg.IncludedDomainLists)
+			break
+		}
+	}
+	return nil
+}
+
+func (s *Service) LoadDomainList(name string, reply *[]string) error {
+	domains, err := loadDomainList(name)
+	if err != nil {
+		return err
+	}
+	*reply = domains
+	return nil
+}
+
+func (s *Service) DeleteDomainList(name string, _ *struct{}) error {
+	return deleteDomainList(name)
 }
 
 func (s *Service) ListAppPresets(_ struct{}, reply *[]string) error {
