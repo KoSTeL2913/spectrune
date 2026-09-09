@@ -77,6 +77,7 @@ func runGUI() {
 
 	bindAPI(w)
 	startHotkeyManager()
+	go checkForUpdateOnLaunch()
 
 	hwin := w.Window()
 
