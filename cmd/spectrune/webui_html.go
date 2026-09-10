@@ -589,6 +589,10 @@ function renderUpdateStatus() {
 var state = {
   profiles: [],
   selected: null,
+  connectBusy: false, // a connect()/disconnect() call is in flight — keep
+                       // btn-connect disabled regardless of what the 3s
+                       // status poll thinks, so a slow Connect can't be
+                       // double-clicked into "already connected"
   connected: false,
   connectedProfile: '',
   handshakeOK: false,
@@ -703,12 +707,12 @@ function updateButtons() {
   $('btn-apps').disabled = !has;
   $('btn-domains').disabled = !has;
   $('btn-delete').disabled = !has;
-  $('btn-connect').disabled = !has && !state.connected;
+  $('btn-connect').disabled = state.connectBusy || (!has && !state.connected);
   if (state.connected && state.handshakeOK) {
     $('status-text').textContent = tf('connected', state.connectedProfile);
     $('status-text').className = 'status-text connected';
     $('btn-connect').textContent = t('disconnect');
-    $('btn-connect').disabled = false;
+    if (!state.connectBusy) $('btn-connect').disabled = false;
   } else if (state.connected) {
     // Adapter/local bridge is up but the WireGuard handshake with the
     // peer hasn't completed (or never will, for a bad config/dead
@@ -719,7 +723,7 @@ function updateButtons() {
     $('status-text').textContent = tf('connecting', state.connectedProfile);
     $('status-text').className = 'status-text connecting';
     $('btn-connect').textContent = t('disconnect');
-    $('btn-connect').disabled = false;
+    if (!state.connectBusy) $('btn-connect').disabled = false;
   } else {
     $('status-text').textContent = t('disconnected');
     $('status-text').className = 'status-text disconnected';
@@ -878,7 +882,18 @@ function renderIncludedAppsPreview(apps) {
 }
 
 function refreshStatus() {
-  getState().then(function(s) {
+  // Must return this promise, not just kick it off — btn-connect's click
+  // handler chains .finally(...) after .then(refreshStatus) specifically
+  // so state.connectBusy doesn't clear until state.connected has
+  // actually been refreshed from the server. Without the return, the
+  // outer promise resolved with getState() still in flight, clearing
+  // connectBusy (and re-enabling the button) on stale state — a second
+  // click landing in that gap still saw state.connected === false and
+  // fired a real second Connect RPC, hitting the backend's genuine
+  // "already connected" error. Confirmed live 2026-09-10 on the Windows
+  // VM: three rapid clicks on Connect, one of them got through as a
+  // real duplicate call despite the busy-flag guard.
+  return getState().then(function(s) {
     state.connected = s.Connected;
     state.connectedProfile = s.ProfileName;
     state.handshakeOK = s.HandshakeOK;
@@ -965,9 +980,12 @@ $('btn-domains').onclick = function() {
   openEdit(state.selected, 'domains');
 };
 $('btn-connect').onclick = function() {
+  if (state.connectBusy) return; // already in flight — ignore a second click
+  state.connectBusy = true;
   $('btn-connect').disabled = true;
   var p = state.connected ? disconnect() : connect(state.selected);
-  p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); });
+  p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
+    .finally(function() { state.connectBusy = false; updateButtons(); });
 };
 
 // ---------- edit view ----------
