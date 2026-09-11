@@ -100,6 +100,15 @@ type UpdateCheckReply struct {
 // a newer release exists, but still installs it in the background —
 // downloading + a silent msiexec install is not something to make the
 // GUI wait on.
+// Deliberately does NOT wait for installRelease to finish before
+// replying — the msiexec install it kicks off stops and restarts
+// SpectruneService, which is this very process, so a reply written
+// after that restart fires would race the process's own death and
+// might never reach the client at all. The GUI instead polls
+// Bridge.Version on fresh connections (webui_html.go's "Check for
+// updates" button) until it sees the new version actually running,
+// which tolerates the service being briefly unreachable mid-restart in
+// a way a single call/reply pair can't.
 func (s *Service) CheckForUpdateNow(_ struct{}, reply *UpdateCheckReply) error {
 	reply.Current = appVersion
 	release, err := fetchLatestRelease()

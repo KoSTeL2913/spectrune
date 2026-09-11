@@ -124,7 +124,14 @@ func dispatch(cmd string, args []string) bool {
 		fatalIf(client.Call("Bridge.DeleteProfile", args[0], &struct{}{}))
 		fmt.Printf("deleted profile: %s\n", args[0])
 	case "/gui":
-		runGUI()
+		runGUI(false)
+	case "/gui-restart":
+		// Used by restartApp (webui_windows.go) — the old GUI process
+		// spawns this one and is still tearing itself down (releasing
+		// the single-instance mutex takes a moment), so runGUI retries
+		// acquiring it briefly instead of immediately treating
+		// ERROR_ALREADY_EXISTS as "another real instance is running."
+		runGUI(true)
 	default:
 		return false
 	}

@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,6 +34,12 @@ var (
 	procSendMessageW     = moduser32.NewProc("SendMessageW")
 	procFindWindowW      = moduser32.NewProc("FindWindowW")
 )
+
+// currentHwnd is set once runGUI creates its window — restartApp's
+// binding needs it for the same clean-shutdown path the tray's Exit
+// handler uses, but bindAPI(w) (which defines that binding) runs before
+// the window/hwnd exists yet, so it can't just close over a local.
+var currentHwnd uintptr
 
 // guiWindowTitle must match WindowOptions.Title below exactly — it's how
 // a second /gui launch finds the already-running window to activate (see
@@ -133,7 +140,14 @@ func writeUIHTMLFile(html string) (string, error) {
 	return path, nil
 }
 
-func runGUI() {
+// runGUI's retryMutex handles restartApp's own relaunch (webui_html.go's
+// "Check for updates" button, via /gui-restart in main_windows.go): the
+// old process that just spawned this one is still tearing itself down
+// when this one starts, so the mutex it holds may not be released yet.
+// Retrying briefly instead of immediately falling back to
+// activateExistingGUIWindow avoids that race just reactivating the
+// still-old-code window that's about to close anyway.
+func runGUI(retryMutex bool) {
 	// Single-instance guard: the desktop shortcut runs "spectrune.exe /gui"
 	// (installer/spectrune.wxs), and nothing before this stopped a second
 	// launch — each one opened its own WebView2 window *and* its own tray
@@ -144,7 +158,16 @@ func runGUI() {
 	// just exiting silently — otherwise clicking the shortcut again while
 	// the app is minimized to tray looks like it did nothing.
 	mutexName, _ := windows.UTF16PtrFromString(`Global\SpectruneGUISingleInstance`)
-	mutex, mutexErr := windows.CreateMutex(nil, false, mutexName)
+	var mutex windows.Handle
+	var mutexErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mutex, mutexErr = windows.CreateMutex(nil, false, mutexName)
+		if mutexErr != windows.ERROR_ALREADY_EXISTS || !retryMutex || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 	if mutexErr == windows.ERROR_ALREADY_EXISTS {
 		if !activateExistingGUIWindow() {
 			log.Printf("another Spectrune GUI instance is already running but its window wasn't found — exiting anyway")
@@ -177,6 +200,11 @@ func runGUI() {
 
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
+	// Stashed for restartApp's binding below — bindAPI(w) (called just
+	// above, before hwnd existed yet) can't close over a local declared
+	// after it, and restartApp needs the same clean-shutdown path the
+	// tray's Exit handler uses.
+	currentHwnd = hwnd
 
 	tray, err := newTrayIcon(
 		func() {
@@ -393,6 +421,45 @@ func bindAPI(w webview2.WebView) {
 			return nil, err
 		}
 		return &reply, nil
+	}))
+
+	// getRunningVersion backs the "Check for updates" button's post-
+	// install poll — see update_windows.go's CheckForUpdateNow doc for
+	// why that RPC's own reply can't be used to detect completion. A
+	// connection failure here (service mid-restart) is a normal, expected
+	// part of that poll, not something to log — so it's returned as a
+	// plain error for the JS side to catch and just try again.
+	must(w.Bind("getRunningVersion", func() (string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		var version string
+		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
+			return "", err
+		}
+		return version, nil
+	}))
+
+	// restartApp relaunches the GUI process — called once the update-
+	// check poll above confirms the service is actually running the new
+	// version. Spawns the replacement (via /gui-restart, so it retries
+	// the single-instance mutex instead of immediately deferring to
+	// this soon-to-close window — see runGUI's doc) before tearing this
+	// one down, so there's always a window on screen, then reuses the
+	// tray's own clean-shutdown path (DestroyWindow, not w.Terminate()
+	// directly) so WebView2's storage backend flushes normally.
+	must(w.Bind("restartApp", func() error {
+		exePath, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err := exec.Command(exePath, "/gui-restart").Start(); err != nil {
+			return err
+		}
+		w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
+		return nil
 	}))
 
 	must(w.Bind("listDomainLists", func() ([]string, error) {

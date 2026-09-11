@@ -78,6 +78,16 @@ func (s *Service) State(_ struct{}, reply *StateReply) error {
 	return nil
 }
 
+// Version reports the *currently running* daemon's version — used by
+// the "Check for updates" button's post-install poll (webui_html.go) to
+// detect when a restarted daemon has actually come up running the new
+// code, since a self-update's own RPC reply can't be trusted to survive
+// the restart it triggers (see update_linux.go's CheckForUpdateNow doc).
+func (s *Service) Version(_ struct{}, reply *string) error {
+	*reply = appVersion
+	return nil
+}
+
 func (s *Service) ListProfiles(_ struct{}, reply *[]string) error {
 	names, err := listProfileNames()
 	if err != nil {

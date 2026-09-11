@@ -496,6 +496,8 @@ var I18N = {
     updateVersionLine: 'Version %%VERSION%%', updateCheckButton: 'Check for updates',
     updateChecking: 'Checking…', updateUpToDate: 'Up to date (%s)',
     updateAvailable: 'Updating to %s…', updateCheckFailed: 'Update check failed: %s',
+    updateRestarting: 'Update installed — restarting…',
+    updateStillInstalling: 'Still installing — reopen the app in a moment.',
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
     presetLoad: 'Load', presetSaveAs: 'Save as…', presetDelete: 'Delete',
@@ -543,6 +545,8 @@ var I18N = {
     updateVersionLine: 'Версия %%VERSION%%', updateCheckButton: 'Проверить обновления',
     updateChecking: 'Проверка…', updateUpToDate: 'Актуальная версия (%s)',
     updateAvailable: 'Обновление до %s…', updateCheckFailed: 'Ошибка проверки: %s',
+    updateRestarting: 'Обновление установлено — перезапуск…',
+    updateStillInstalling: 'Ещё устанавливается — откройте приложение чуть позже.',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
     presetLoad: 'Загрузить', presetSaveAs: 'Сохранить как…', presetDelete: 'Удалить',
@@ -1628,16 +1632,49 @@ $('settings-autostart-toggle').onchange = function() {
     showListError(err);
   });
 };
+// pollForRestart waits for the daemon/service to actually come back up
+// running a version different from previousVersion — see
+// update_linux.go/update_windows.go's CheckForUpdateNow doc for why
+// this has to be a poll on fresh connections rather than trusting that
+// RPC's own reply: installing restarts the very process answering it,
+// so the reply can be (and during testing, was) lost to that restart
+// before ever reaching here. A connection failure mid-poll is the
+// expected, normal shape of "it's restarting right now," not an error.
+// Only calls restartApp() once the new version is confirmed running —
+// never on a blind timer — so the GUI never relaunches itself into a
+// half-installed or failed update.
+function pollForRestart(previousVersion, deadline) {
+  if (Date.now() > deadline) {
+    $('update-status-text').textContent = t('updateStillInstalling');
+    $('btn-check-update').disabled = false;
+    return;
+  }
+  getRunningVersion().then(function(v) {
+    if (v && v !== previousVersion) {
+      $('update-status-text').textContent = t('updateRestarting');
+      restartApp();
+    } else {
+      setTimeout(function() { pollForRestart(previousVersion, deadline); }, 1500);
+    }
+  }).catch(function() {
+    setTimeout(function() { pollForRestart(previousVersion, deadline); }, 1500);
+  });
+}
 $('btn-check-update').onclick = function() {
   $('btn-check-update').disabled = true;
   $('update-status-text').textContent = t('updateChecking');
   checkForUpdateNow().then(function(reply) {
-    $('update-status-text').textContent = reply.Available
-      ? tf('updateAvailable', reply.Latest)
-      : tf('updateUpToDate', reply.Current);
+    if (reply.Available) {
+      $('update-status-text').textContent = tf('updateAvailable', reply.Latest);
+      pollForRestart(reply.Current, Date.now() + 60000);
+    } else {
+      $('update-status-text').textContent = tf('updateUpToDate', reply.Current);
+      $('btn-check-update').disabled = false;
+    }
   }).catch(function(err) {
     $('update-status-text').textContent = tf('updateCheckFailed', String(err));
-  }).finally(function() { $('btn-check-update').disabled = false; });
+    $('btn-check-update').disabled = false;
+  });
 };
 $('theme-mode-dark').onclick = function() { setThemeMode('dark'); };
 $('theme-mode-light').onclick = function() { setThemeMode('light'); };

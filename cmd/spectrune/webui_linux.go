@@ -241,6 +241,43 @@ func bindAPI(w webview.WebView) {
 		return &reply, nil
 	}))
 
+	// getRunningVersion backs the "Check for updates" button's post-
+	// install poll — see update_linux.go's CheckForUpdateNow doc for why
+	// that RPC's own reply can't be used to detect completion. A
+	// connection failure here (daemon mid-restart) is a normal, expected
+	// part of that poll, not something to log — so it's returned as a
+	// plain error for the JS side to catch and just try again.
+	must(w.Bind("getRunningVersion", func() (string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		var version string
+		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
+			return "", err
+		}
+		return version, nil
+	}))
+
+	// restartApp relaunches the GUI process — called once the update-
+	// check poll above confirms the daemon is actually running the new
+	// version, so the user sees it reflected immediately instead of the
+	// still-open window quietly running old code until next manual
+	// restart. Spawns the replacement before tearing this one down so
+	// there's always a window on screen.
+	must(w.Bind("restartApp", func() error {
+		exePath, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err := exec.Command(exePath, "/gui").Start(); err != nil {
+			return err
+		}
+		w.Dispatch(func() { w.Terminate() })
+		return nil
+	}))
+
 	// listInstalledApps / a picked app's "Path" both go through the
 	// daemon (ListApps/LaunchApp) rather than a local, unprivileged scan —
 	// unlike Windows' registry-based enumeration, .desktop scanning itself
