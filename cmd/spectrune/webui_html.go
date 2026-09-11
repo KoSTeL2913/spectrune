@@ -1664,15 +1664,6 @@ document.querySelectorAll('.theme-swatch').forEach(function(el) {
 
 // ---------- startup ----------
 
-// Domain-list routing (ipset/iptables mangle) has no Windows equivalent —
-// window.listDomainLists simply isn't bound there. Hide both entry
-// points (the quick-access button on the main screen and the one inside
-// the profile editor) rather than let either fail into a view with data
-// it can't load.
-if (!window.listDomainLists) {
-  $('btn-open-domains').style.display = 'none';
-  $('btn-domains').style.display = 'none';
-}
 
 applyTheme();
 applyI18n();

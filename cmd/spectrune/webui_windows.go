@@ -89,14 +89,8 @@ func setWindowIconFromResource(hwnd uintptr) {
 // site below for why this is pre-formatted text rather than the raw
 // conf.Config.
 type ProfileDetails struct {
-	ConfigText   string
-	IncludedApps []string
-	// IncludedDomainLists always comes back empty here — domain-list
-	// routing (domainlists_linux.go) is a Linux-only feature, built on
-	// cgroup/ipset mechanisms Windows' WFP-based per-app interception
-	// doesn't have an equivalent of. Kept on this struct only so the
-	// shared webui_html.go JS (which reads/writes this field
-	// unconditionally) doesn't need an OS feature-detect for it.
+	ConfigText          string
+	IncludedApps        []string
 	IncludedDomainLists []string
 	AutoConnect         bool
 	Hotkey              string
@@ -299,16 +293,14 @@ func bindAPI(w webview2.WebView) {
 		// literal "10,4,0,3/32" garbage. ToWgQuick() is the same
 		// serializer every other save path in this app already trusts.
 		return &ProfileDetails{
-			ConfigText:   cfg.ToWgQuick(),
-			IncludedApps: cfg.Interface.IncludedApps,
-			AutoConnect:  cfg.Interface.AutoConnect,
-			Hotkey:       cfg.Interface.Hotkey,
+			ConfigText:          cfg.ToWgQuick(),
+			IncludedApps:        cfg.Interface.IncludedApps,
+			IncludedDomainLists: cfg.Interface.IncludedDomainLists,
+			AutoConnect:         cfg.Interface.AutoConnect,
+			Hotkey:              cfg.Interface.Hotkey,
 		}, nil
 	}))
 
-	// includedDomainLists is accepted (to match the shared webui_html.go
-	// JS's call signature) and discarded — see ProfileDetails' doc comment
-	// above on why this feature has no Windows equivalent.
 	must(w.Bind("saveProfile", func(name, wgQuickText string, includedApps []string, includedDomainLists []string, autoConnect bool, hotkey string) error {
 		if !profileNameIsValid(name) {
 			return fmt.Errorf("profile name %q is not valid", name)
@@ -323,6 +315,7 @@ func bindAPI(w webview2.WebView) {
 		}
 		cfg.Name = name
 		cfg.Interface.IncludedApps = includedApps
+		cfg.Interface.IncludedDomainLists = includedDomainLists
 		cfg.Interface.AutoConnect = autoConnect
 		cfg.Interface.Hotkey = hotkey
 		client, err := ipcDial()
@@ -400,6 +393,53 @@ func bindAPI(w webview2.WebView) {
 			return nil, err
 		}
 		return &reply, nil
+	}))
+
+	must(w.Bind("listDomainLists", func() ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var names []string
+		if err := client.Call("Bridge.ListDomainLists", struct{}{}, &names); err != nil {
+			return nil, err
+		}
+		return names, nil
+	}))
+
+	must(w.Bind("saveDomainList", func(name string, domains []string) error {
+		if !profileNameIsValid(name) {
+			return fmt.Errorf("domain list name %q is not valid", name)
+		}
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.SaveDomainList", DomainListSaveRequest{Name: name, Domains: domains}, &struct{}{})
+	}))
+
+	must(w.Bind("loadDomainList", func(name string) ([]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var domains []string
+		if err := client.Call("Bridge.LoadDomainList", name, &domains); err != nil {
+			return nil, err
+		}
+		return domains, nil
+	}))
+
+	must(w.Bind("deleteDomainList", func(name string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.DeleteDomainList", name, &struct{}{})
 	}))
 
 	must(w.Bind("listInstalledApps", func() ([]installedApp, error) {

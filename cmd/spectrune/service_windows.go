@@ -127,6 +127,7 @@ func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
 	s.mu.Unlock()
 	if isActive {
 		bridge.UpdateIncludedApps(cfg.Interface.IncludedApps)
+		bridge.UpdateDomains(resolveDomainLists(cfg.Interface.IncludedDomainLists))
 	}
 
 	// At most one profile can be marked AutoConnect — the whole app only
@@ -291,6 +292,55 @@ func (s *Service) LoadAppPreset(name string, reply *[]string) error {
 
 func (s *Service) DeleteAppPreset(name string, _ *struct{}) error {
 	return deleteAppPreset(name)
+}
+
+func (s *Service) ListDomainLists(_ struct{}, reply *[]string) error {
+	names, err := listDomainListNames()
+	if err != nil {
+		return err
+	}
+	*reply = names
+	return nil
+}
+
+func (s *Service) SaveDomainList(req DomainListSaveRequest, _ *struct{}) error {
+	if err := saveDomainList(req.Name, req.Domains); err != nil {
+		return err
+	}
+	// Live-update any connected profile that has this list enabled —
+	// otherwise editing a list's own domains while it's already toggled
+	// on for the active profile wouldn't take effect until a reconnect.
+	s.mu.Lock()
+	bridge := s.bridge
+	name := s.activeProfile
+	s.mu.Unlock()
+	if bridge == nil {
+		return nil
+	}
+	cfg, err := loadProfile(name)
+	if err != nil {
+		return nil
+	}
+	for _, enabled := range cfg.Interface.IncludedDomainLists {
+		if enabled == req.Name {
+			bridge.UpdateDomains(resolveDomainLists(cfg.Interface.IncludedDomainLists))
+			break
+		}
+	}
+	return nil
+}
+
+func (s *Service) LoadDomainList(name string, reply *[]string) error {
+	domains, err := loadDomainList(name)
+	if err != nil {
+		return err
+	}
+	*reply = domains
+	return nil
+}
+
+func (s *Service) DeleteDomainList(name string, _ *struct{}) error {
+	return deleteDomainList(name)
 }
 
 // winService adapts Service to svc.Handler for svc.Run.

@@ -282,6 +282,19 @@ func (b *Bridge) UpdateIncludedApps(apps []string) {
 	b.closeStaleConns()
 }
 
+// UpdateDomains swaps the live domain-list selection on an already-
+// running tunnel — same trigger (Service.SaveProfile) and reasoning as
+// UpdateIncludedApps, just for domain-list routing instead of app-based.
+// Takes the already-resolved flat domain slice, not list names — the
+// caller (service_windows.go) does that resolution the same way
+// Connect/newOutboundTunnel do.
+func (b *Bridge) UpdateDomains(domains []string) {
+	if b.outTun == nil {
+		return
+	}
+	b.outTun.updateDomains(domains)
+}
+
 // HandshakeOK reports whether the outbound tunnel has ever completed a
 // WireGuard handshake with its peer — see outboundTunnel.hasHandshake's
 // doc. True in pass-through mode (b.outTun == nil, no config.conf), since
@@ -442,12 +455,12 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	local := gonet.NewTCPConn(&wq, endpoint)
 
-	if b.outTun.matches(procName) {
+	if b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String()) {
 		log.Printf("  -> TUNNEL (matched %s)", procName)
 		go b.relayViaTunnel(local, id.LocalAddress.String(), id.LocalPort, procName)
 	} else {
 		log.Printf("  -> direct")
-		go b.relayDirect(local, dstAddr, procName)
+		go b.relayDirect(local, dstAddr, id.LocalPort, procName)
 	}
 }
 
@@ -474,7 +487,18 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 	}
 	local := gonet.NewUDPConn(&wq, endpoint)
 
-	if b.outTun.matches(procName) {
+	// DNS responses are snooped regardless of which path carries them —
+	// an app that isn't itself included can still resolve a domain that's
+	// in an enabled domain list, and the resulting IP needs to be learned
+	// either way for matchesDomainIP to catch that app's *next* connection
+	// (the actual HTTPS/etc traffic, a separate connection from the DNS
+	// lookup itself).
+	var onResponse func([]byte)
+	if id.LocalPort == 53 {
+		onResponse = b.outTun.observeDNSResponse
+	}
+
+	if b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String()) {
 		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL", appAddr, dstAddr, pid, procName)
 		go b.relayUDP(local, procName, true, func() (net.Conn, error) {
 			addr, err := netip.ParseAddr(id.LocalAddress.String())
@@ -482,12 +506,12 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 				return nil, err
 			}
 			return b.outTun.dialUDP(netip.AddrPortFrom(addr, id.LocalPort))
-		})
+		}, onResponse)
 	} else {
 		go b.relayUDP(local, procName, false, func() (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second, Control: b.bindToRealIface}
 			return d.Dial("udp4", dstAddr)
-		})
+		}, onResponse)
 	}
 }
 
@@ -495,7 +519,15 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 // "connection" (already bound to the app's address, per gVisor's UDP
 // forwarder) and a freshly dialed remote socket, closing both sides after
 // a period of inactivity — UDP has no close handshake to key off of.
-func (b *Bridge) relayUDP(local *gonet.UDPConn, procName string, viaTunnel bool, dial func() (net.Conn, error)) {
+//
+// onResponse, when non-nil, is handed a copy of every remote->local
+// datagram before it's forwarded — used only for DNS connections
+// (destination port 53), to passively learn domain->IP associations for
+// domain-list routing (see outboundTunnel.observeDNSResponse). Called
+// regardless of viaTunnel: an app that isn't itself included can still
+// resolve a domain that's in an enabled list, and that resolution needs
+// to be observed no matter which path carried the query.
+func (b *Bridge) relayUDP(local *gonet.UDPConn, procName string, viaTunnel bool, dial func() (net.Conn, error), onResponse func([]byte)) {
 	connID := b.trackConn(procName, viaTunnel, local)
 	defer b.untrackConn(connID)
 	defer local.Close()
@@ -506,7 +538,7 @@ func (b *Bridge) relayUDP(local *gonet.UDPConn, procName string, viaTunnel bool,
 	}
 	defer remote.Close()
 
-	pipe := func(dst, src net.Conn) {
+	pipe := func(dst, src net.Conn, snoop func([]byte)) {
 		buf := make([]byte, 65535)
 		for {
 			src.SetReadDeadline(time.Now().Add(udpIdleTimeout))
@@ -514,14 +546,17 @@ func (b *Bridge) relayUDP(local *gonet.UDPConn, procName string, viaTunnel bool,
 			if err != nil {
 				return
 			}
+			if snoop != nil {
+				snoop(buf[:n])
+			}
 			if _, err := dst.Write(buf[:n]); err != nil {
 				return
 			}
 		}
 	}
 	done := make(chan struct{}, 2)
-	go func() { pipe(remote, local); done <- struct{}{} }()
-	go func() { pipe(local, remote); done <- struct{}{} }()
+	go func() { pipe(remote, local, nil); done <- struct{}{} }()
+	go func() { pipe(local, remote, onResponse); done <- struct{}{} }()
 	<-done
 }
 
@@ -534,6 +569,39 @@ func (b *Bridge) bindToRealIface(_, _ string, c syscall.RawConn) error {
 		return err
 	}
 	return ctrlErr
+}
+
+// dnsTCPSink accumulates a stream of TCP/53 bytes and hands each
+// complete, length-prefixed DNS message (RFC 1035 §4.2.2 framing: a
+// 2-byte big-endian length before each message) to onMessage as it
+// completes. A TCP DNS response can arrive split across multiple reads,
+// or with more than one message back-to-back in a single read — unlike
+// UDP, where relayUDP's per-datagram snoop already lines up with
+// "one read = one message." Implements io.Writer so it can sit behind
+// an io.TeeReader on the remote->local copy without touching the
+// existing streaming relay logic.
+type dnsTCPSink struct {
+	buf       []byte
+	onMessage func([]byte)
+}
+
+func (s *dnsTCPSink) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	for len(s.buf) >= 2 {
+		msgLen := int(s.buf[0])<<8 | int(s.buf[1])
+		if len(s.buf) < 2+msgLen {
+			break
+		}
+		s.onMessage(s.buf[2 : 2+msgLen])
+		s.buf = s.buf[2+msgLen:]
+	}
+	// Cap unbounded growth from a non-DNS TCP/53 talker (shouldn't
+	// happen — port 53 is always DNS in practice — but don't let a
+	// malformed stream grow this forever).
+	if len(s.buf) > 65535 {
+		s.buf = nil
+	}
+	return len(p), nil
 }
 
 func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint16, procName string) {
@@ -555,16 +623,21 @@ func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint
 	log.Printf("  relayViaTunnel: dial %s:%d via tunnel OK, relaying", dstIP, dstPort)
 	defer remote.Close()
 
+	var src io.Reader = remote
+	if dstPort == 53 {
+		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.outTun.observeDNSResponse})
+	}
+
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(remote, local); done <- struct{}{} }()
-	go func() { io.Copy(local, remote); done <- struct{}{} }()
+	go func() { io.Copy(local, src); done <- struct{}{} }()
 	<-done
 }
 
 // relayDirect dials the real destination directly, over the real physical
 // interface (bypassing our own default route via IP_UNICAST_IF), and
 // pipes bytes both ways. This is the "not included" path.
-func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, procName string) {
+func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint16, procName string) {
 	connID := b.trackConn(procName, false, local)
 	defer b.untrackConn(connID)
 	defer local.Close()
@@ -592,6 +665,11 @@ func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, procName stri
 	log.Printf("  relayDirect: dial %s OK, local=%s remote=%s, relaying", dstAddr, remote.LocalAddr(), remote.RemoteAddr())
 	defer remote.Close()
 
+	var src io.Reader = remote
+	if dstPort == 53 {
+		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.outTun.observeDNSResponse})
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
 		n, e := io.Copy(remote, local)
@@ -599,7 +677,7 @@ func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, procName stri
 		done <- struct{}{}
 	}()
 	go func() {
-		n, e := io.Copy(local, remote)
+		n, e := io.Copy(local, src)
 		log.Printf("  relayDirect: remote->local done n=%d err=%v", n, e)
 		done <- struct{}{}
 	}()
