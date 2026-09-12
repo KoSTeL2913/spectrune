@@ -130,6 +130,27 @@ func enumerateInstalledApps() []installedApp {
 		apps = append(apps, installedApp{Name: name, Path: path})
 	}
 
+	// A handful of built-in Windows tools have no Uninstall entry at all
+	// (they're part of the OS, not an "installed program") and often no
+	// App Paths entry either — mstsc.exe/cmd.exe in particular, both
+	// requested explicitly since routing an already-open Remote Desktop
+	// session or a terminal's traffic through the tunnel is a real,
+	// common use case the registry scan below just can't see on its
+	// own. Added first, before the scan, so if one of these DOES also
+	// turn up there under a rawer name (e.g. "mstsc"), add()'s dedup
+	// keeps this friendlier one instead of the other way around.
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		sysRoot = `C:\Windows`
+	}
+	for _, sysApp := range []struct{ name, exe string }{
+		{"Удалённый рабочий стол", "mstsc.exe"},
+		{"Командная строка", "cmd.exe"},
+		{"Windows PowerShell", "powershell.exe"},
+	} {
+		add(sysApp.name, filepath.Join(sysRoot, "System32", sysApp.exe))
+	}
+
 	appPathsRoots := []struct {
 		root registry.Key
 		path string
