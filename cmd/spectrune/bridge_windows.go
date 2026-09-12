@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -236,10 +237,23 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 	// NIC) that Get-NetAdapter/bestOutboundInterface never singles out. A
 	// blanket outbound firewall block for the entire IPv6 address range
 	// is authoritative regardless of which interface would've carried it.
+	//
+	// Only applied in full-tunnel mode (no app selection) — "route
+	// everything" is the only case this leak actually contradicts user
+	// intent. In split-tunnel mode the user has already said "just these
+	// apps go through the tunnel, everything else stays direct," so an
+	// app that was never included going out over IPv6 isn't a leak at
+	// all, it's exactly what was asked for — but the blanket block
+	// doesn't know the difference and kills IPv6 for literally every
+	// other process on the machine too. Confirmed live 2026-09-12: this
+	// broke an unrelated AnyDesk session (AnyDesk prefers IPv6 when
+	// available) on a split-tunnel profile that never included it.
 	// Best-effort — a failure here shouldn't block an otherwise-working
 	// connection.
-	if err := blockIPv6Firewall(); err != nil {
-		log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
+	if b.outTun == nil || len(b.outTun.includedApps) == 0 {
+		if err := blockIPv6Firewall(); err != nil {
+			log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
+		}
 	}
 
 	if b.outTun != nil && len(b.outTun.includedApps) > 0 {
@@ -394,9 +408,18 @@ const ipv6FirewallRuleName = "SpectruneBlockIPv6"
 // this is idempotent (harmless if called twice, e.g. after a crash left
 // one behind despite the startup safety net).
 func blockIPv6Firewall() error {
+	// -RemoteAddress '::/0' (the natural "all IPv6" CIDR) is rejected
+	// outright by New-NetFirewallRule on at least this Windows version —
+	// "One or more address prefixes are invalid" — meaning this whole
+	// rule silently never applied, every single time, since this was
+	// written; the resulting IPv6 leak guard has never actually blocked
+	// anything, all failures swallowed by Start()'s best-effort log-and-
+	// continue. Confirmed live 2026-09-13. An explicit full-range
+	// address (lowest to highest IPv6 address) is accepted instead and
+	// covers the exact same address space.
 	script := fmt.Sprintf(
 		`Remove-NetFirewallRule -DisplayName '%[1]s' -ErrorAction SilentlyContinue; `+
-			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -RemoteAddress '::/0' -Profile Any`,
+			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -RemoteAddress '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' -Profile Any`,
 		ipv6FirewallRuleName,
 	)
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
@@ -431,6 +454,18 @@ func configureWindowsInterface() error {
 	return nil
 }
 
+// handleForwarded/handleUDPForwarded both special-case pid == os.Getpid()
+// — this daemon process's *own* outbound traffic (the update checker's
+// GitHub API calls, in particular) always goes direct, never through
+// its own tunnel, regardless of full-tunnel/split-tunnel/domain-list
+// matching. Confirmed live 2026-09-13: on a full-tunnel profile, the
+// daemon's own "check for updates" HTTP client got swept into its own
+// interception and relayed via the VPN peer, and a slow/distant peer
+// blew past its 10s timeout, logging a spurious-looking "context
+// deadline exceeded" that had nothing to do with GitHub. There's no
+// scenario where routing the app's own maintenance traffic through the
+// tunnel it itself manages is desirable — worst case it makes the VPN
+// depend on itself to fetch its own fix.
 func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	appAddr := net.JoinHostPort(id.RemoteAddress.String(), portStr(id.RemotePort))
@@ -455,7 +490,7 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	local := gonet.NewTCPConn(&wq, endpoint)
 
-	if b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String()) {
+	if int(pid) != os.Getpid() && (b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String())) {
 		log.Printf("  -> TUNNEL (matched %s)", procName)
 		go b.relayViaTunnel(local, id.LocalAddress.String(), id.LocalPort, procName)
 	} else {
@@ -498,7 +533,7 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 		onResponse = b.outTun.observeDNSResponse
 	}
 
-	if b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String()) {
+	if int(pid) != os.Getpid() && (b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String())) {
 		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL", appAddr, dstAddr, pid, procName)
 		go b.relayUDP(local, procName, true, func() (net.Conn, error) {
 			addr, err := netip.ParseAddr(id.LocalAddress.String())
