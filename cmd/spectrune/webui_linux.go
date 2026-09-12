@@ -17,15 +17,24 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/webview/webview_go"
 )
 
 const guiWindowTitle = "Spectrune"
+
+// currentWebview is set once runGUI creates its window — pollAndRestart
+// needs it to trigger a restart from its own background goroutine,
+// which has no webview.WebView of its own to close over (it's started
+// before bindAPI/the window would otherwise make one available, and
+// unlike the restartApp binding, isn't defined inside bindAPI at all).
+var currentWebview webview.WebView
 
 // ProfileDetails mirrors webui_windows.go's — same JSON shape the shared
 // webUIHTML JS already expects.
@@ -72,12 +81,28 @@ func writeUIHTMLFile(html string) (string, error) {
 func runGUI() {
 	w := webview.New(false)
 	defer w.Destroy()
+	currentWebview = w
 	w.SetTitle(guiWindowTitle)
 	w.SetSize(560, 640, webview.HintNone)
 
 	bindAPI(w)
 	startHotkeyManager()
 	go checkForUpdateOnLaunch()
+	// The manual "Check for updates" button (webui_html.go) has its own
+	// poll-then-restart loop once it sees Available:true — but the
+	// *silent* checkForUpdateOnLaunch above has no such feedback path at
+	// all (it's fire-and-forget by design, so a routine launch never
+	// blocks on network I/O). Without this, a silent background update
+	// leaves whatever GUI window happened to be open at the time quietly
+	// running old code until the user notices and restarts it by hand —
+	// confirmed live 2026-09-11: exactly what happened on a real
+	// machine, since the window that ended up open predated this whole
+	// auto-restart feature and had no way to know to look for it. This
+	// runs unconditionally on every launch rather than only when told an
+	// update is happening, precisely because the silent path can't tell
+	// this loop that — see pollAndRestart's own doc for why that's an
+	// acceptable, low-cost trade-off.
+	go pollAndRestart(appVersion, time.Now().Add(2*time.Minute))
 
 	hwin := w.Window()
 
@@ -116,6 +141,60 @@ func must(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bind: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// triggerRestart spawns a replacement GUI process before tearing this
+// one down, so there's always a window on screen — shared by the
+// manual "Check for updates" button's restartApp binding and
+// pollAndRestart's own background safety net below.
+func triggerRestart(w webview.WebView) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := exec.Command(exePath, "/gui").Start(); err != nil {
+		return err
+	}
+	w.Dispatch(func() { w.Terminate() })
+	return nil
+}
+
+// pollAndRestart is checkForUpdateOnLaunch's silent counterpart to the
+// "Check for updates" button's own poll loop (webui_html.go's
+// pollForRestart) — but since that Go-side silent check is genuinely
+// fire-and-forget (never reports back whether it found/installed
+// anything, by design, so a routine launch never blocks on network
+// I/O), this can't be told "an update is happening" the way the button
+// can. Instead it just always watches, for a couple of minutes after
+// every launch, whether the daemon's own reported version ever changes
+// out from under it — the low, fixed cost of one extra RPC every few
+// seconds for a couple of minutes buys covering the exact gap that bit
+// a real machine live 2026-09-11 (a GUI window left open across a
+// silent background update, showing stale UI indefinitely with no way
+// to know it should refresh itself). Never restarts on a timeout or
+// error — only once a genuinely different version is actually seen
+// running, same safety property the button's own loop guarantees.
+func pollAndRestart(previousVersion string, deadline time.Time) {
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Second)
+		client, err := ipcDial()
+		if err != nil {
+			continue // daemon unreachable — mid-restart, or just not up yet
+		}
+		var version string
+		callErr := client.Call("Bridge.Version", struct{}{}, &version)
+		client.Close()
+		if callErr != nil {
+			continue
+		}
+		if version != "" && version != previousVersion {
+			log.Printf("pollAndRestart: daemon version changed %s -> %s, restarting GUI", previousVersion, version)
+			if err := triggerRestart(currentWebview); err != nil {
+				log.Printf("pollAndRestart: triggerRestart: %v", err)
+			}
+			return
+		}
 	}
 }
 
@@ -264,18 +343,9 @@ func bindAPI(w webview.WebView) {
 	// check poll above confirms the daemon is actually running the new
 	// version, so the user sees it reflected immediately instead of the
 	// still-open window quietly running old code until next manual
-	// restart. Spawns the replacement before tearing this one down so
-	// there's always a window on screen.
+	// restart.
 	must(w.Bind("restartApp", func() error {
-		exePath, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		if err := exec.Command(exePath, "/gui").Start(); err != nil {
-			return err
-		}
-		w.Dispatch(func() { w.Terminate() })
-		return nil
+		return triggerRestart(w)
 	}))
 
 	// listInstalledApps / a picked app's "Path" both go through the

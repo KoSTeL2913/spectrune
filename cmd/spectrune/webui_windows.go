@@ -26,20 +26,49 @@ import (
 )
 
 var (
-	modkernel32          = windows.NewLazySystemDLL("kernel32.dll")
-	procGetConsoleWindow = modkernel32.NewProc("GetConsoleWindow")
-	moduser32            = windows.NewLazySystemDLL("user32.dll")
-	procShowWindow       = moduser32.NewProc("ShowWindow")
-	procLoadImageW       = moduser32.NewProc("LoadImageW")
-	procSendMessageW     = moduser32.NewProc("SendMessageW")
-	procFindWindowW      = moduser32.NewProc("FindWindowW")
+	modkernel32            = windows.NewLazySystemDLL("kernel32.dll")
+	procGetConsoleWindow   = modkernel32.NewProc("GetConsoleWindow")
+	procRegisterAppRestart = modkernel32.NewProc("RegisterApplicationRestart")
+	moduser32              = windows.NewLazySystemDLL("user32.dll")
+	procShowWindow         = moduser32.NewProc("ShowWindow")
+	procLoadImageW         = moduser32.NewProc("LoadImageW")
+	procSendMessageW       = moduser32.NewProc("SendMessageW")
+	procFindWindowW        = moduser32.NewProc("FindWindowW")
 )
+
+// registerForRestart tells Windows Restart Manager: if you ever have to
+// close this process to replace a file it has open (exactly what an MSI
+// upgrade's InstallFiles step does when spectrune.exe is running — the
+// GUI holds its own exe open just by being the running image), relaunch
+// it afterward with "/gui". This is the actual, OS-native answer to
+// "the app was open before an update, it should come back after" —
+// simpler and more reliable than trying to detect and react to being
+// closed from inside the process itself, since by definition there's no
+// chance to run our own code once Restart Manager has decided to end
+// the process. Confirmed live 2026-09-13 that this is a real, existing
+// gap: a GUI window running an old build (predating this call entirely)
+// silently vanished during a background update and never came back.
+// RESTART_NO_CRASH|RESTART_NO_HANG (1|2) excludes the crash/hang
+// triggers — only a deliberate Restart-Manager-initiated close (an
+// update) should bring it back, not a real crash going into a loop.
+func registerForRestart() {
+	cmdLine, err := windows.UTF16PtrFromString("/gui")
+	if err != nil {
+		return
+	}
+	procRegisterAppRestart.Call(uintptr(unsafe.Pointer(cmdLine)), 3)
+}
 
 // currentHwnd is set once runGUI creates its window — restartApp's
 // binding needs it for the same clean-shutdown path the tray's Exit
 // handler uses, but bindAPI(w) (which defines that binding) runs before
 // the window/hwnd exists yet, so it can't just close over a local.
 var currentHwnd uintptr
+
+// currentWebview is set once runGUI creates its window — pollAndRestart
+// needs it to trigger a restart from its own background goroutine,
+// which has no webview2.WebView of its own to close over.
+var currentWebview webview2.WebView
 
 // guiWindowTitle must match WindowOptions.Title below exactly — it's how
 // a second /gui launch finds the already-running window to activate (see
@@ -179,6 +208,7 @@ func runGUI(retryMutex bool) {
 	}
 
 	hideConsoleWindow()
+	registerForRestart()
 
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,
@@ -190,6 +220,7 @@ func runGUI(retryMutex bool) {
 			Center: true,
 		},
 	})
+	currentWebview = w
 	if w == nil {
 		log.Fatal("failed to initialize WebView2 — is the WebView2 Runtime installed? (bundled with Windows 10 1809+/11 by default)")
 	}
@@ -205,6 +236,21 @@ func runGUI(retryMutex bool) {
 	// after it, and restartApp needs the same clean-shutdown path the
 	// tray's Exit handler uses.
 	currentHwnd = hwnd
+	// The manual "Check for updates" button (webui_html.go) has its own
+	// poll-then-restart loop once it sees Available:true — but the
+	// *silent* checkForUpdateOnLaunch above has no such feedback path at
+	// all (it's fire-and-forget by design, so a routine launch never
+	// blocks on network I/O). Without this, a silent background update
+	// leaves whatever GUI window happened to be open at the time quietly
+	// running old code until the user notices and restarts it by hand —
+	// confirmed live 2026-09-11: exactly what happened on a real
+	// machine, since the window that ended up open predated this whole
+	// auto-restart feature and had no way to know to look for it. This
+	// runs unconditionally on every launch rather than only when told an
+	// update is happening, precisely because the silent path can't tell
+	// this loop that — see pollAndRestart's own doc for why that's an
+	// acceptable, low-cost trade-off.
+	go pollAndRestart(appVersion, time.Now().Add(2*time.Minute))
 
 	tray, err := newTrayIcon(
 		func() {
@@ -277,6 +323,68 @@ func runGUI(retryMutex bool) {
 	// on. A short grace period here before the process actually exits
 	// gives that a real chance to finish instead of racing it.
 	time.Sleep(300 * time.Millisecond)
+}
+
+// triggerRestart spawns a replacement GUI process (via /gui-restart, so
+// it retries the single-instance mutex instead of immediately
+// deferring to this soon-to-close window — see runGUI's doc) before
+// tearing this one down, so there's always a window on screen, then
+// reuses the tray's own clean-shutdown path (DestroyWindow, not
+// w.Terminate() directly) so WebView2's storage backend flushes
+// normally. Shared by the manual "Check for updates" button's
+// restartApp binding and pollAndRestart's own background safety net
+// below.
+func triggerRestart(w webview2.WebView) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := exec.Command(exePath, "/gui-restart").Start(); err != nil {
+		return err
+	}
+	w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
+	return nil
+}
+
+// pollAndRestart is checkForUpdateOnLaunch's silent counterpart to the
+// "Check for updates" button's own poll loop (webui_html.go's
+// pollForRestart) — but since that Go-side silent check is genuinely
+// fire-and-forget (never reports back whether it found/installed
+// anything, by design, so a routine launch never blocks on network
+// I/O), this can't be told "an update is happening" the way the button
+// can. Instead it just always watches, for a couple of minutes after
+// every launch, whether the service's own reported version ever
+// changes out from under it — the low, fixed cost of one extra RPC
+// every few seconds for a couple of minutes buys covering the exact
+// gap that bit a real machine live 2026-09-11 (a GUI window left open
+// across a silent background update, showing stale UI indefinitely
+// with no way to know it should refresh itself). Never restarts on a
+// timeout or error — only once a genuinely different version is
+// actually seen running, same safety property the button's own loop
+// guarantees.
+func pollAndRestart(previousVersion string, deadline time.Time) {
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Second)
+		client, err := ipcDial()
+		if err != nil {
+			continue // service unreachable — mid-restart, or just not up yet
+		}
+		var version string
+		callErr := client.Call("Bridge.Version", struct{}{}, &version)
+		client.Close()
+		if callErr != nil {
+			continue
+		}
+		if version != "" && version != previousVersion {
+			log.Printf("pollAndRestart: service version changed %s -> %s, restarting GUI", previousVersion, version)
+			if w := currentWebview; w != nil {
+				if err := triggerRestart(w); err != nil {
+					log.Printf("pollAndRestart: triggerRestart: %v", err)
+				}
+			}
+			return
+		}
+	}
 }
 
 // bindAPI exposes Go functions as window.<name>(...) promises in the page
@@ -444,22 +552,9 @@ func bindAPI(w webview2.WebView) {
 
 	// restartApp relaunches the GUI process — called once the update-
 	// check poll above confirms the service is actually running the new
-	// version. Spawns the replacement (via /gui-restart, so it retries
-	// the single-instance mutex instead of immediately deferring to
-	// this soon-to-close window — see runGUI's doc) before tearing this
-	// one down, so there's always a window on screen, then reuses the
-	// tray's own clean-shutdown path (DestroyWindow, not w.Terminate()
-	// directly) so WebView2's storage backend flushes normally.
+	// version.
 	must(w.Bind("restartApp", func() error {
-		exePath, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		if err := exec.Command(exePath, "/gui-restart").Start(); err != nil {
-			return err
-		}
-		w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
-		return nil
+		return triggerRestart(w)
 	}))
 
 	must(w.Bind("listDomainLists", func() ([]string, error) {
