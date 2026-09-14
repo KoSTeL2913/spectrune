@@ -177,6 +177,11 @@ func dispatch(cmd string, args []string) bool {
 		fmt.Printf("deleted domain list: %s\n", args[0])
 	case "/gui":
 		runGUI()
+	case "/wait-and-reopen":
+		// Spawned by webui_linux.go's closeForUpdate right before the GUI
+		// closes itself for an in-progress update — see update_linux.go's
+		// waitAndReopen doc.
+		waitAndReopen()
 	default:
 		return false
 	}

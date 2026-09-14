@@ -17,7 +17,6 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,13 +27,6 @@ import (
 )
 
 const guiWindowTitle = "Spectrune"
-
-// currentWebview is set once runGUI creates its window — pollAndRestart
-// needs it to trigger a restart from its own background goroutine,
-// which has no webview.WebView of its own to close over (it's started
-// before bindAPI/the window would otherwise make one available, and
-// unlike the restartApp binding, isn't defined inside bindAPI at all).
-var currentWebview webview.WebView
 
 // ProfileDetails mirrors webui_windows.go's — same JSON shape the shared
 // webUIHTML JS already expects.
@@ -81,28 +73,25 @@ func writeUIHTMLFile(html string) (string, error) {
 func runGUI() {
 	w := webview.New(false)
 	defer w.Destroy()
-	currentWebview = w
 	w.SetTitle(guiWindowTitle)
 	w.SetSize(560, 640, webview.HintNone)
 
 	bindAPI(w)
 	startHotkeyManager()
 	go checkForUpdateOnLaunch()
-	// The manual "Check for updates" button (webui_html.go) has its own
-	// poll-then-restart loop once it sees Available:true — but the
-	// *silent* checkForUpdateOnLaunch above has no such feedback path at
-	// all (it's fire-and-forget by design, so a routine launch never
-	// blocks on network I/O). Without this, a silent background update
-	// leaves whatever GUI window happened to be open at the time quietly
-	// running old code until the user notices and restarts it by hand —
-	// confirmed live 2026-09-11: exactly what happened on a real
-	// machine, since the window that ended up open predated this whole
-	// auto-restart feature and had no way to know to look for it. This
-	// runs unconditionally on every launch rather than only when told an
-	// update is happening, precisely because the silent path can't tell
-	// this loop that — see pollAndRestart's own doc for why that's an
-	// acceptable, low-cost trade-off.
-	go pollAndRestart(appVersion, time.Now().Add(2*time.Minute))
+	// checkForUpdateOnLaunch above is fire-and-forget by design (never
+	// reports back whether it found/installed anything, so a routine
+	// launch never blocks on network I/O) — the GUI's own
+	// checkBackgroundUpdate loop (webui_html.go), polling
+	// Bridge.UpdateInProgress every 3s regardless of what triggered an
+	// install, is what notices this one starting and handles closing
+	// and relaunching the window. An earlier version of this file also
+	// ran a second, independent Go-side poll-and-restart loop here as a
+	// safety net for this exact silent path — removed 2026-09-14 after
+	// it and the JS-side mechanism raced each other into spawning two
+	// replacement windows for the same update (confirmed live: two
+	// overlapping Spectrune windows after one install). One mechanism,
+	// not two.
 
 	hwin := w.Window()
 
@@ -141,60 +130,6 @@ func must(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bind: %v\n", err)
 		os.Exit(1)
-	}
-}
-
-// triggerRestart spawns a replacement GUI process before tearing this
-// one down, so there's always a window on screen — shared by the
-// manual "Check for updates" button's restartApp binding and
-// pollAndRestart's own background safety net below.
-func triggerRestart(w webview.WebView) error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if err := exec.Command(exePath, "/gui").Start(); err != nil {
-		return err
-	}
-	w.Dispatch(func() { w.Terminate() })
-	return nil
-}
-
-// pollAndRestart is checkForUpdateOnLaunch's silent counterpart to the
-// "Check for updates" button's own poll loop (webui_html.go's
-// pollForRestart) — but since that Go-side silent check is genuinely
-// fire-and-forget (never reports back whether it found/installed
-// anything, by design, so a routine launch never blocks on network
-// I/O), this can't be told "an update is happening" the way the button
-// can. Instead it just always watches, for a couple of minutes after
-// every launch, whether the daemon's own reported version ever changes
-// out from under it — the low, fixed cost of one extra RPC every few
-// seconds for a couple of minutes buys covering the exact gap that bit
-// a real machine live 2026-09-11 (a GUI window left open across a
-// silent background update, showing stale UI indefinitely with no way
-// to know it should refresh itself). Never restarts on a timeout or
-// error — only once a genuinely different version is actually seen
-// running, same safety property the button's own loop guarantees.
-func pollAndRestart(previousVersion string, deadline time.Time) {
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Second)
-		client, err := ipcDial()
-		if err != nil {
-			continue // daemon unreachable — mid-restart, or just not up yet
-		}
-		var version string
-		callErr := client.Call("Bridge.Version", struct{}{}, &version)
-		client.Close()
-		if callErr != nil {
-			continue
-		}
-		if version != "" && version != previousVersion {
-			log.Printf("pollAndRestart: daemon version changed %s -> %s, restarting GUI", previousVersion, version)
-			if err := triggerRestart(currentWebview); err != nil {
-				log.Printf("pollAndRestart: triggerRestart: %v", err)
-			}
-			return
-		}
 	}
 }
 
@@ -320,25 +255,6 @@ func bindAPI(w webview.WebView) {
 		return &reply, nil
 	}))
 
-	// getRunningVersion backs the "Check for updates" button's post-
-	// install poll — see update_linux.go's CheckForUpdateNow doc for why
-	// that RPC's own reply can't be used to detect completion. A
-	// connection failure here (daemon mid-restart) is a normal, expected
-	// part of that poll, not something to log — so it's returned as a
-	// plain error for the JS side to catch and just try again.
-	must(w.Bind("getRunningVersion", func() (string, error) {
-		client, err := ipcDial()
-		if err != nil {
-			return "", err
-		}
-		defer client.Close()
-		var version string
-		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
-			return "", err
-		}
-		return version, nil
-	}))
-
 	// getUpdateInProgress backs the "installing update" overlay
 	// (webui_html.go's checkBackgroundUpdate, polled continuously in the
 	// background, not just after a manual "Check for updates" click) —
@@ -360,13 +276,70 @@ func bindAPI(w webview.WebView) {
 		return installing, nil
 	}))
 
-	// restartApp relaunches the GUI process — called once the update-
-	// check poll above confirms the daemon is actually running the new
-	// version, so the user sees it reflected immediately instead of the
-	// still-open window quietly running old code until next manual
-	// restart.
-	must(w.Bind("restartApp", func() error {
-		return triggerRestart(w)
+	// getRunningVersion backs checkBackgroundUpdate's fallback check —
+	// on a small/fast package or a fast connection, the whole download+
+	// dpkg -i+restart cycle can finish in well under one 3s poll
+	// interval, so a poll can land entirely between two ticks and never
+	// once observe updateInProgress==true (confirmed live 2026-09-14:
+	// the window sat on a stale connection-error banner afterward,
+	// having missed the only chance to notice). Comparing the daemon's
+	// actual reported version against what this page loaded with
+	// catches that case too, independent of whether the in-progress
+	// flag was ever caught.
+	must(w.Bind("getRunningVersion", func() (string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		var version string
+		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
+			return "", err
+		}
+		return version, nil
+	}))
+
+	// closeForUpdate actually closes this window once an install has
+	// started or finished (webui_html.go's checkBackgroundUpdate) —
+	// staying open for the whole dpkg -i run used to leave a stale
+	// window sitting on top of the daemon restarting underneath it
+	// (reported live 2026-09-14: the window plainly did not close during
+	// install).
+	//
+	// alreadyDone is checkBackgroundUpdate's fallback path (JS side): the
+	// daemon's version has already been observed to differ from this
+	// page's own, meaning the install is confirmed finished before this
+	// was ever called — so this launches the plain, always-supported
+	// /gui subcommand directly rather than /wait-and-reopen, no polling
+	// needed. That distinction matters for more than just speed: when
+	// !alreadyDone, waitAndReopen re-execs whatever's on disk at this
+	// exact path, and on a fast install dpkg can replace that file
+	// within under two seconds of the caller's very first sight of
+	// updateInProgress==true — spawning it too late (a delay briefly
+	// tried *before* the spawn, reverted 2026-09-14) risked losing that
+	// race and re-exec'ing an already-replaced binary that might not
+	// even recognize /wait-and-reopen. Confirmed live: exactly that,
+	// printing a plain usage error instead of ever polling for anything,
+	// silently leaving no GUI running at all afterward. So delayMs below
+	// only ever pushes out the window-close itself (for the "installing"
+	// overlay to be visible for a moment), never the spawn.
+	must(w.Bind("closeForUpdate", func(delayMs int, alreadyDone bool) error {
+		exePath, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		relaunchArg := "/wait-and-reopen"
+		if alreadyDone {
+			relaunchArg = "/gui"
+		}
+		if err := exec.Command(exePath, relaunchArg).Start(); err != nil {
+			return err
+		}
+		if delayMs > 0 {
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		}
+		w.Dispatch(func() { w.Terminate() })
+		return nil
 	}))
 
 	// listInstalledApps / a picked app's "Path" both go through the

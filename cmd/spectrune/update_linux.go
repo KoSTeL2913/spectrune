@@ -181,9 +181,32 @@ func installRelease(release *ghRelease) {
 	// dpkg, so it survives spectrune.service's own cgroup being killed;
 	// postinst's "systemctl enable --now spectrune.service" then starts
 	// the new binary once dpkg finishes, same as a normal manual upgrade.
-	out, err := exec.Command("systemd-run", "--scope", "--collect", "--", "dpkg", "-i", path).CombinedOutput()
+	//
+	// Second, independent bug found the same day after the fix above:
+	// CombinedOutput() pipes dpkg's stdout/stderr back through THIS
+	// process — but this process is the one about to receive SIGTERM
+	// from that very "systemctl stop", and when it exits, its end of
+	// that pipe closes with it. dpkg (and systemd-run, which inherits
+	// the same fd) then gets SIGPIPE on its very next write and dies —
+	// surviving the cgroup kill only to be taken out by a broken pipe
+	// instead, leaving the exact same half-configured package. Confirmed
+	// live: dpkg.log stopped mid-transaction even with the scope fix in
+	// place. Fixed by giving dpkg a real log file instead of a pipe —
+	// a file has no "broken pipe" concept, so it keeps writing to its
+	// own fd regardless of whether this process is still around to read
+	// it.
+	logPath := filepath.Join(updateStateDir, "install.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		log.Printf("update check: dpkg -i failed: %v (%s)", err, string(out))
+		log.Printf("update check: opening %s: %v", logPath, err)
+		return
+	}
+	defer logFile.Close()
+	cmd := exec.Command("systemd-run", "--scope", "--collect", "--", "dpkg", "-i", path)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Run(); err != nil {
+		log.Printf("update check: dpkg -i failed: %v (see %s)", err, logPath)
 		return
 	}
 
@@ -191,6 +214,37 @@ func installRelease(release *ghRelease) {
 	if err := exec.Command("systemctl", "restart", "--no-block", "spectrune.service").Start(); err != nil {
 		log.Printf("update check: systemctl restart: %v", err)
 	}
+}
+
+// waitAndReopen is spawned by the GUI (webui_linux.go's closeForUpdate
+// binding) right before it closes itself for an in-progress update,
+// then keeps running under the OLD, already-unlinked binary — Linux
+// lets a running process keep executing a file after it's replaced on
+// disk (see this file's top comment), so this process's own appVersion
+// stays the pre-update value throughout, safe to compare against. Polls
+// the daemon until it reports a different version, then launches a
+// fresh GUI. Best-effort: gives up silently after a couple of minutes
+// (failed download, no .deb asset, etc.) rather than looping forever —
+// the user can always reopen manually if that happens.
+func waitAndReopen() {
+	log.Printf("waitAndReopen: watching for a version change from %s", appVersion)
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		if client, err := ipcDial(); err == nil {
+			var v string
+			callErr := client.Call("Bridge.Version", struct{}{}, &v)
+			client.Close()
+			if callErr == nil && v != "" && v != appVersion {
+				log.Printf("waitAndReopen: daemon now running %s, relaunching GUI", v)
+				if exePath, err := os.Executable(); err == nil {
+					exec.Command(exePath, "/gui").Start()
+				}
+				return
+			}
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}
+	log.Printf("waitAndReopen: gave up after deadline, no version change seen")
 }
 
 func lastCheckFilePath() string {

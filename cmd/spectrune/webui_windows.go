@@ -59,16 +59,11 @@ func registerForRestart() {
 	procRegisterAppRestart.Call(uintptr(unsafe.Pointer(cmdLine)), 3)
 }
 
-// currentHwnd is set once runGUI creates its window — restartApp's
+// currentHwnd is set once runGUI creates its window — closeForUpdate's
 // binding needs it for the same clean-shutdown path the tray's Exit
 // handler uses, but bindAPI(w) (which defines that binding) runs before
 // the window/hwnd exists yet, so it can't just close over a local.
 var currentHwnd uintptr
-
-// currentWebview is set once runGUI creates its window — pollAndRestart
-// needs it to trigger a restart from its own background goroutine,
-// which has no webview2.WebView of its own to close over.
-var currentWebview webview2.WebView
 
 // guiWindowTitle must match WindowOptions.Title below exactly — it's how
 // a second /gui launch finds the already-running window to activate (see
@@ -169,12 +164,13 @@ func writeUIHTMLFile(html string) (string, error) {
 	return path, nil
 }
 
-// runGUI's retryMutex handles restartApp's own relaunch (webui_html.go's
-// "Check for updates" button, via /gui-restart in main_windows.go): the
-// old process that just spawned this one is still tearing itself down
-// when this one starts, so the mutex it holds may not be released yet.
-// Retrying briefly instead of immediately falling back to
-// activateExistingGUIWindow avoids that race just reactivating the
+// runGUI's retryMutex handles closeForUpdate's own relaunch (a Scheduled
+// Task firing /gui-restart, in main_windows.go): the old process is
+// still tearing itself down (or, for closeForUpdate specifically, the
+// exe may have only just been replaced by the update) when this one
+// starts, so the mutex it holds may not be released yet. Retrying
+// briefly instead of immediately falling back to
+// activateExistingGUIWindow avoids that race just reactivating a
 // still-old-code window that's about to close anyway.
 func runGUI(retryMutex bool) {
 	// Single-instance guard: the desktop shortcut runs "spectrune.exe /gui"
@@ -220,7 +216,6 @@ func runGUI(retryMutex bool) {
 			Center: true,
 		},
 	})
-	currentWebview = w
 	if w == nil {
 		log.Fatal("failed to initialize WebView2 — is the WebView2 Runtime installed? (bundled with Windows 10 1809+/11 by default)")
 	}
@@ -231,26 +226,23 @@ func runGUI(retryMutex bool) {
 
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
-	// Stashed for restartApp's binding below — bindAPI(w) (called just
-	// above, before hwnd existed yet) can't close over a local declared
-	// after it, and restartApp needs the same clean-shutdown path the
-	// tray's Exit handler uses.
+	// Stashed for closeForUpdate's binding below — bindAPI(w) (called
+	// just above, before hwnd existed yet) can't close over a local
+	// declared after it, and closeForUpdate needs the same clean-
+	// shutdown path the tray's Exit handler uses.
 	currentHwnd = hwnd
-	// The manual "Check for updates" button (webui_html.go) has its own
-	// poll-then-restart loop once it sees Available:true — but the
-	// *silent* checkForUpdateOnLaunch above has no such feedback path at
-	// all (it's fire-and-forget by design, so a routine launch never
-	// blocks on network I/O). Without this, a silent background update
-	// leaves whatever GUI window happened to be open at the time quietly
-	// running old code until the user notices and restarts it by hand —
-	// confirmed live 2026-09-11: exactly what happened on a real
-	// machine, since the window that ended up open predated this whole
-	// auto-restart feature and had no way to know to look for it. This
-	// runs unconditionally on every launch rather than only when told an
-	// update is happening, precisely because the silent path can't tell
-	// this loop that — see pollAndRestart's own doc for why that's an
-	// acceptable, low-cost trade-off.
-	go pollAndRestart(appVersion, time.Now().Add(2*time.Minute))
+	// checkForUpdateOnLaunch above is fire-and-forget by design (never
+	// reports back whether it found/installed anything, so a routine
+	// launch never blocks on network I/O) — the GUI's own
+	// checkBackgroundUpdate loop (webui_html.go), polling
+	// Bridge.UpdateInProgress every 3s regardless of what triggered an
+	// install, is what notices this one starting and handles closing
+	// and relaunching the window. An earlier version of this file also
+	// ran a second, independent Go-side poll-and-restart loop here as a
+	// safety net for this exact silent path — removed 2026-09-14 after
+	// it and the JS-side mechanism raced each other into spawning two
+	// replacement windows for the same update (confirmed live on Linux,
+	// same shared code path). One mechanism, not two.
 
 	tray, err := newTrayIcon(
 		func() {
@@ -323,68 +315,6 @@ func runGUI(retryMutex bool) {
 	// on. A short grace period here before the process actually exits
 	// gives that a real chance to finish instead of racing it.
 	time.Sleep(300 * time.Millisecond)
-}
-
-// triggerRestart spawns a replacement GUI process (via /gui-restart, so
-// it retries the single-instance mutex instead of immediately
-// deferring to this soon-to-close window — see runGUI's doc) before
-// tearing this one down, so there's always a window on screen, then
-// reuses the tray's own clean-shutdown path (DestroyWindow, not
-// w.Terminate() directly) so WebView2's storage backend flushes
-// normally. Shared by the manual "Check for updates" button's
-// restartApp binding and pollAndRestart's own background safety net
-// below.
-func triggerRestart(w webview2.WebView) error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if err := exec.Command(exePath, "/gui-restart").Start(); err != nil {
-		return err
-	}
-	w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
-	return nil
-}
-
-// pollAndRestart is checkForUpdateOnLaunch's silent counterpart to the
-// "Check for updates" button's own poll loop (webui_html.go's
-// pollForRestart) — but since that Go-side silent check is genuinely
-// fire-and-forget (never reports back whether it found/installed
-// anything, by design, so a routine launch never blocks on network
-// I/O), this can't be told "an update is happening" the way the button
-// can. Instead it just always watches, for a couple of minutes after
-// every launch, whether the service's own reported version ever
-// changes out from under it — the low, fixed cost of one extra RPC
-// every few seconds for a couple of minutes buys covering the exact
-// gap that bit a real machine live 2026-09-11 (a GUI window left open
-// across a silent background update, showing stale UI indefinitely
-// with no way to know it should refresh itself). Never restarts on a
-// timeout or error — only once a genuinely different version is
-// actually seen running, same safety property the button's own loop
-// guarantees.
-func pollAndRestart(previousVersion string, deadline time.Time) {
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Second)
-		client, err := ipcDial()
-		if err != nil {
-			continue // service unreachable — mid-restart, or just not up yet
-		}
-		var version string
-		callErr := client.Call("Bridge.Version", struct{}{}, &version)
-		client.Close()
-		if callErr != nil {
-			continue
-		}
-		if version != "" && version != previousVersion {
-			log.Printf("pollAndRestart: service version changed %s -> %s, restarting GUI", previousVersion, version)
-			if w := currentWebview; w != nil {
-				if err := triggerRestart(w); err != nil {
-					log.Printf("pollAndRestart: triggerRestart: %v", err)
-				}
-			}
-			return
-		}
-	}
 }
 
 // bindAPI exposes Go functions as window.<name>(...) promises in the page
@@ -531,25 +461,6 @@ func bindAPI(w webview2.WebView) {
 		return &reply, nil
 	}))
 
-	// getRunningVersion backs the "Check for updates" button's post-
-	// install poll — see update_windows.go's CheckForUpdateNow doc for
-	// why that RPC's own reply can't be used to detect completion. A
-	// connection failure here (service mid-restart) is a normal, expected
-	// part of that poll, not something to log — so it's returned as a
-	// plain error for the JS side to catch and just try again.
-	must(w.Bind("getRunningVersion", func() (string, error) {
-		client, err := ipcDial()
-		if err != nil {
-			return "", err
-		}
-		defer client.Close()
-		var version string
-		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
-			return "", err
-		}
-		return version, nil
-	}))
-
 	// getUpdateInProgress backs the "installing update" overlay
 	// (webui_html.go's checkBackgroundUpdate, polled continuously in the
 	// background, not just after a manual "Check for updates" click) —
@@ -571,11 +482,89 @@ func bindAPI(w webview2.WebView) {
 		return installing, nil
 	}))
 
-	// restartApp relaunches the GUI process — called once the update-
-	// check poll above confirms the service is actually running the new
-	// version.
-	must(w.Bind("restartApp", func() error {
-		return triggerRestart(w)
+	// getRunningVersion backs checkBackgroundUpdate's fallback check —
+	// on a small/fast package or a fast connection, the whole download+
+	// msiexec+restart cycle can finish in well under one 3s poll
+	// interval, so a poll can land entirely between two ticks and never
+	// once observe updateInProgress==true (confirmed live on Linux
+	// 2026-09-14, same shared JS path: the window sat on a stale
+	// connection-error banner afterward, having missed the only chance
+	// to notice). Comparing the service's actual reported version
+	// against what this page loaded with catches that case too,
+	// independent of whether the in-progress flag was ever caught.
+	must(w.Bind("getRunningVersion", func() (string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		var version string
+		if err := client.Call("Bridge.Version", struct{}{}, &version); err != nil {
+			return "", err
+		}
+		return version, nil
+	}))
+
+	// closeForUpdate actually closes this window once an install has
+	// started (webui_html.go's checkBackgroundUpdate), instead of
+	// staying open for the whole msiexec run — this GUI's own running
+	// spectrune.exe is a second, separate lock on that file beyond the
+	// service's own (which installer/spectrune.wxs's ServiceControl
+	// entry already handles), and would otherwise still risk forcing
+	// Windows Installer's pending-file-rename/reboot fallback even with
+	// that fix in place.
+	//
+	// Deliberately does NOT spawn a replacement process directly — any
+	// spectrune.exe this GUI started would hold the very same lock for
+	// as long as it stays alive waiting for the new version, recreating
+	// the exact problem this exists to avoid. Instead it registers a
+	// one-shot Scheduled Task (unelevated, runs as this same logged-on
+	// user — no Session 0 isolation issue, same technique already
+	// proven for launching interactive processes around an SSH/Session-0
+	// boundary in this project's sibling split-tunnel work) timed a bit
+	// past a typical msiexec run, so nothing at all runs in between and
+	// no window of any kind exists where the exe could be locked by a
+	// relaunch mechanism. /gui-restart retries its single-instance mutex
+	// for a few seconds (runGUI's own doc) as slack for imprecise
+	// timing. This is now the single restart mechanism for both the
+	// automatic and manual update paths (see runGUI's doc for why an
+	// earlier, second mechanism was removed).
+	// delayMs (shared JS signature with webui_linux.go's closeForUpdate,
+	// where the ordering matters a lot more — see that one's doc) only
+	// pushes out when this window actually closes, purely so the
+	// caller's "installing" overlay is visible for a moment first;
+	// the Scheduled Task itself is always created immediately, before
+	// any delay, since its trigger time needs to be measured from "now"
+	// regardless. alreadyDone is checkBackgroundUpdate's fallback path
+	// (JS side): the service's version was already observed to differ
+	// from this page's own, meaning the install is confirmed finished
+	// already — so the task fires almost immediately (just enough slack
+	// for this window's own DestroyWindow to release the single-instance
+	// mutex) instead of the full 25s meant to outlast a still-running
+	// msiexec.
+	must(w.Bind("closeForUpdate", func(delayMs int, alreadyDone bool) error {
+		exePath, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		relaunchDelay := 25 * time.Second
+		if alreadyDone {
+			relaunchDelay = 2 * time.Second
+		}
+		triggerTime := time.Now().Add(relaunchDelay).Format("15:04:05")
+		createArgs := []string{
+			"/create", "/tn", "SpectruneRelaunchAfterUpdate",
+			"/tr", fmt.Sprintf(`"%s" /gui-restart`, exePath),
+			"/sc", "once", "/st", triggerTime, "/it", "/f",
+		}
+		if out, err := exec.Command("schtasks", createArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("schtasks /create: %w (%s)", err, string(out))
+		}
+		if delayMs > 0 {
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		}
+		w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
+		return nil
 	}))
 
 	must(w.Bind("listDomainLists", func() ([]string, error) {

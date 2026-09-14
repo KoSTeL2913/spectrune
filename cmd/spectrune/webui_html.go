@@ -531,8 +531,6 @@ var I18N = {
     updateVersionLine: 'Version %%VERSION%%', updateCheckButton: 'Check for updates',
     updateChecking: 'Checking…', updateUpToDate: 'Up to date (%s)',
     updateAvailable: 'Updating to %s…', updateCheckFailed: 'Update check failed: %s',
-    updateRestarting: 'Update installed — restarting…',
-    updateStillInstalling: 'Still installing — reopen the app in a moment.',
     updateInstallingOverlay: 'Installing an update. Spectrune will restart automatically…',
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
@@ -582,8 +580,6 @@ var I18N = {
     updateVersionLine: 'Версия %%VERSION%%', updateCheckButton: 'Проверить обновления',
     updateChecking: 'Проверка…', updateUpToDate: 'Актуальная версия (%s)',
     updateAvailable: 'Обновление до %s…', updateCheckFailed: 'Ошибка проверки: %s',
-    updateRestarting: 'Обновление установлено — перезапуск…',
-    updateStillInstalling: 'Ещё устанавливается — откройте приложение чуть позже.',
     updateInstallingOverlay: 'Устанавливается обновление. Spectrune перезапустится автоматически…',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
@@ -1728,60 +1724,72 @@ $('settings-autostart-toggle').onchange = function() {
     showListError(err);
   });
 };
-// pollForRestart waits for the daemon/service to actually come back up
-// running a version different from previousVersion — see
-// update_linux.go/update_windows.go's CheckForUpdateNow doc for why
-// this has to be a poll on fresh connections rather than trusting that
-// RPC's own reply: installing restarts the very process answering it,
-// so the reply can be (and during testing, was) lost to that restart
-// before ever reaching here. A connection failure mid-poll is the
-// expected, normal shape of "it's restarting right now," not an error.
-// Only calls restartApp() once the new version is confirmed running —
-// never on a blind timer — so the GUI never relaunches itself into a
-// half-installed or failed update.
-function pollForRestart(previousVersion, deadline) {
-  if (Date.now() > deadline) {
-    $('update-status-text').textContent = t('updateStillInstalling');
-    $('btn-check-update').disabled = false;
-    // Also used by checkBackgroundUpdate below — an automatic update
-    // that's still not done after the deadline (or genuinely failed,
-    // e.g. a bad download) shouldn't leave the user staring at the
-    // overlay forever with no way back into the app.
+// checkBackgroundUpdate polls Bridge.UpdateInProgress (via
+// getUpdateInProgress) so ANY self-update — the silent per-launch/once-
+// an-hour background check, or a manual "Check for updates" click —
+// actually closes this window during the install instead of leaving it
+// sitting open on top of the daemon/service restarting underneath it
+// (reported live 2026-09-14: the window plainly did not close). Shows
+// the overlay briefly first so the message is actually visible, then
+// calls closeForUpdate — which spawns a small watcher
+// (update_linux.go's waitAndReopen / update_windows.go's Scheduled-Task
+// equivalent) that relaunches the GUI once the new version is confirmed
+// running, and only then terminates this window. Piggybacks on the
+// same 3s cadence as refreshStatus below. This is the single restart
+// mechanism for every update path — an earlier version of this file
+// had a second, independent Go-side poll-and-restart loop for the
+// silent path specifically, removed 2026-09-14 after it and this one
+// raced each other into spawning two replacement windows for the same
+// update (confirmed live: two overlapping Spectrune windows after one
+// install). backgroundUpdateHandled latches once triggered so a still-
+// installing update doesn't re-trigger this every tick; reset if
+// closeForUpdate itself fails, so the app doesn't get stuck behind a
+// permanent overlay over nothing actually happening.
+var backgroundUpdateHandled = false;
+function triggerCloseForUpdate(showOverlayFirst) {
+  if (backgroundUpdateHandled) return;
+  backgroundUpdateHandled = true;
+  // The delay (if any) is passed *into* closeForUpdate rather than
+  // applied here via setTimeout before calling it — closeForUpdate's Go
+  // side spawns its relaunch watcher immediately, before sleeping for
+  // this delay, purely so the overlay is visible for a moment before
+  // the window actually closes. Delaying the call itself would delay
+  // that spawn too, and on a fast install that spawn can lose its race
+  // against dpkg/msiexec replacing this exe on disk — see
+  // webui_linux.go's closeForUpdate doc for what that looked like live.
+  // !showOverlayFirst means checkBackgroundUpdate's fallback path called
+  // this, i.e. the new version is already confirmed running — passed
+  // through as alreadyDone so the Go side can relaunch immediately via
+  // the plain, always-supported /gui rather than a poll-and-wait watcher.
+  if (showOverlayFirst) $('update-installing-overlay').style.display = 'flex';
+  closeForUpdate(showOverlayFirst ? 1500 : 0, !showOverlayFirst).catch(function() {
     $('update-installing-overlay').style.display = 'none';
     backgroundUpdateHandled = false;
-    return;
-  }
-  getRunningVersion().then(function(v) {
-    if (v && v !== previousVersion) {
-      $('update-status-text').textContent = t('updateRestarting');
-      restartApp();
-    } else {
-      setTimeout(function() { pollForRestart(previousVersion, deadline); }, 1500);
-    }
-  }).catch(function() {
-    setTimeout(function() { pollForRestart(previousVersion, deadline); }, 1500);
   });
 }
-// checkBackgroundUpdate polls Bridge.UpdateInProgress (via
-// getUpdateInProgress) so an *automatic* self-update — triggered on GUI
-// launch or the once-an-hour background check, not just a manual "Check
-// for updates" click — gets the same honest "installing" UI instead of
-// refreshStatus's raw connection-error banner the moment dpkg/msiexec
-// restarts the daemon/service. Piggybacks on the same 3s cadence as
-// refreshStatus below. backgroundUpdateHandled latches once shown so a
-// still-installing update doesn't re-trigger this every tick; reset by
-// pollForRestart above once that poll gives up or succeeds.
-var backgroundUpdateHandled = false;
 function checkBackgroundUpdate() {
   if (backgroundUpdateHandled) return;
   getUpdateInProgress().then(function(installing) {
-    if (installing && !backgroundUpdateHandled) {
-      backgroundUpdateHandled = true;
-      $('update-installing-overlay').style.display = 'flex';
-      pollForRestart(appVersionStr, Date.now() + 120000);
+    if (installing) {
+      triggerCloseForUpdate(true);
+      return;
     }
+    // Fallback: a small package on a fast connection can finish the
+    // whole download+install+restart cycle in well under one 3s poll
+    // interval, landing entirely between two ticks — this poll would
+    // then see updateInProgress==false the whole time and never once
+    // catch it (confirmed live 2026-09-14: the window was left sitting
+    // on a stale connection-error banner from the brief outage, having
+    // missed its only chance to notice). Comparing the daemon/service's
+    // actual running version against what this page loaded with catches
+    // that case too, independent of the in-progress flag's timing.
+    return getRunningVersion().then(function(v) {
+      if (v && v !== appVersionStr) {
+        triggerCloseForUpdate(false);
+      }
+    });
   }).catch(function() {
-    // Daemon unreachable or an old build without this RPC — nothing
+    // Daemon unreachable or an old build without these RPCs — nothing
     // useful to show yet; refreshStatus's own error path still covers
     // a genuine, non-update outage.
   });
@@ -1791,8 +1799,11 @@ $('btn-check-update').onclick = function() {
   $('update-status-text').textContent = t('updateChecking');
   checkForUpdateNow().then(function(reply) {
     if (reply.Available) {
+      // Just the immediate "found one" feedback — checkBackgroundUpdate's
+      // own 3s poll (already running unconditionally) is what notices
+      // Bridge.UpdateInProgress flip true right after this and takes
+      // over closing/relaunching the window, same as the silent path.
       $('update-status-text').textContent = tf('updateAvailable', reply.Latest);
-      pollForRestart(reply.Current, Date.now() + 60000);
     } else {
       $('update-status-text').textContent = tf('updateUpToDate', reply.Current);
       $('btn-check-update').disabled = false;
