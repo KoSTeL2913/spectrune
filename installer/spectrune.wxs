@@ -139,6 +139,31 @@
                  and never touched it again, so its absence from the MSI
                  went unnoticed until a real from-scratch install. -->
             <File Id="WintunDll" Name="wintun.dll" Source="wintun.dll" />
+            <!--
+              Stops the running SpectruneService before its exe gets
+              overwritten below. WiX schedules ServiceControl's Stop at
+              the standard StopServices action, which runs well before
+              InstallFiles — without this, nothing stops the old service
+              until the InstallService custom action's own
+              waitForServiceStop call, which only fires AFTER InstallFiles
+              (sequence 6502 vs. InstallFiles' ~4000). Confirmed live
+              2026-09-14: with the service left running (and thus holding
+              spectrune.exe open) all the way through InstallFiles,
+              Windows Installer can't replace the locked exe in place and
+              falls back to a pending-rename that only completes on
+              reboot — this IS the "restart during install" the silent
+              self-update (update_windows.go) was hitting on every run,
+              since it's the running service itself that launches
+              msiexec. Start="no" here deliberately — installService()
+              (the InstallService custom action) still does its own
+              delete+recreate+Start, so this only needs to unstick the
+              file lock, not manage the service lifecycle end to end.
+              Start/Remove are deliberately omitted (not "no" — that's
+              not a legal value for either attribute; omitting is how you
+              opt out) since installService() already owns both.
+            -->
+            <ServiceControl Id="StopSpectruneServiceForUpdate" Name="SpectruneService"
+                             Stop="both" Wait="yes" />
           </Component>
         </Directory>
       </Directory>

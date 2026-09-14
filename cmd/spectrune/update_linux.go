@@ -154,7 +154,22 @@ func installRelease(release *ghRelease) {
 	}
 
 	log.Printf("update check: installing %s", path)
-	out, err := exec.Command("dpkg", "-i", path).CombinedOutput()
+	// Run dpkg -i in its own transient systemd scope, NOT as a plain child
+	// of this process. This process IS spectrune.service's main PID, and
+	// dpkg -i on an upgrade runs the OLD package's prerm first, which does
+	// "systemctl stop spectrune.service". With systemd's default
+	// KillMode=control-group, that stop kills every process in the
+	// service's cgroup — and a plain child process inherits that same
+	// cgroup, so dpkg (and prerm's own shell) got killed mid-transaction
+	// by the very stop it had just issued, leaving the package
+	// half-configured and the daemon gone with nothing left to restart
+	// it. Confirmed live 2026-09-14: this is why an update made the VPN
+	// stop working outright instead of just restarting. systemd-run
+	// --scope creates a separate transient unit (its own cgroup) for
+	// dpkg, so it survives spectrune.service's own cgroup being killed;
+	// postinst's "systemctl enable --now spectrune.service" then starts
+	// the new binary once dpkg finishes, same as a normal manual upgrade.
+	out, err := exec.Command("systemd-run", "--scope", "--collect", "--", "dpkg", "-i", path).CombinedOutput()
 	if err != nil {
 		log.Printf("update check: dpkg -i failed: %v (%s)", err, string(out))
 		return
