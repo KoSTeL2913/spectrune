@@ -155,6 +155,23 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 		log.Printf("running in pure pass-through mode, everything relays direct")
 	}
 
+	// A stale adapter from an unclean previous shutdown (a crash, a
+	// force-killed process, or the whole machine losing power/being
+	// reset mid-connection — none of which run Stop()'s normal Close())
+	// leaves the fixed-GUID adapter still registered at the driver level
+	// even though nothing is using it, and CreateAdapter below fails
+	// outright against it ("Cannot create a file when that file already
+	// exists") rather than reusing it — confirmed live 2026-09-14, and
+	// previously worked around by rebooting the whole machine, which is
+	// not a reasonable thing to ask a user to do. OpenAdapter+Close
+	// cleans up exactly that leftover state before trying to create a
+	// fresh one; harmless no-op (OpenAdapter just fails, ignored) if
+	// there was nothing stale to begin with.
+	if stale, err := wintun.OpenAdapter(adapterName); err == nil {
+		log.Printf("found a stale %q adapter from an unclean previous shutdown, removing it", adapterName)
+		stale.Close()
+	}
+
 	adapter, err := wintun.CreateAdapter(adapterName, tunnelType, &adapterGUID)
 	if err != nil {
 		return b.failStart(fmt.Errorf("CreateAdapter: %w", err))
