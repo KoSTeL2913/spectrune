@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -433,9 +432,9 @@ func runService() error {
 	// and would otherwise leave outbound IPv6 blocked system-wide even
 	// while disconnected. Unconditionally removing it on every service
 	// start is a no-op when it was never added, so it's cheap insurance.
-	if out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue", ipv6FirewallRuleName)).CombinedOutput(); err != nil {
-		log.Printf("startup IPv6 safety net: Remove-NetFirewallRule failed: %v (%s)", err, string(out))
+	if out, err := runPowerShellWithRetry(
+		fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue", ipv6FirewallRuleName)); err != nil {
+		log.Printf("startup IPv6 safety net: Remove-NetFirewallRule failed: %v (%s)", err, out)
 	}
 
 	return svc.Run(serviceName, &winService{svc: &Service{}})

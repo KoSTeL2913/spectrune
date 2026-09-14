@@ -359,8 +359,11 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 	// Best-effort — a failure here shouldn't block an otherwise-working
 	// connection.
 	if b.outTun == nil || len(b.outTun.includedApps) == 0 {
+		log.Printf("full-tunnel/pass-through mode: blocking outbound IPv6 to prevent it bypassing the tunnel")
 		if err := blockIPv6Firewall(); err != nil {
 			log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
+		} else {
+			log.Printf("outbound IPv6 blocked successfully")
 		}
 	}
 
@@ -513,6 +516,33 @@ func (b *Bridge) Stop() {
 // which removes any leftover rule from an unclean shutdown.
 const ipv6FirewallRuleName = "SpectruneBlockIPv6"
 
+// runPowerShellWithRetry runs a PowerShell script up to 3 times (a first
+// try, then two retries 1.5s apart) before giving up, returning the last
+// attempt's error/output. The NetSecurity module's cmdlets (New-/Remove-
+// NetFirewallRule) go through the MSFT_NetFirewallRule CIM/WMI provider,
+// which depends on Windows' own Base Filtering Engine/WMI services —
+// SpectruneService auto-starts and can race ahead of those being fully
+// ready, especially right after boot. Confirmed live 2026-09-14: manually
+// re-running the *exact* same script (both as a normal user and as
+// SYSTEM via a Scheduled Task, well after boot) always succeeded
+// immediately, while the real service's own calls intermittently failed
+// with a bare "exit status 1" and empty output — a transient race, not a
+// bad command, is the only explanation consistent with both observations.
+func runPowerShellWithRetry(script string) (string, error) {
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		out, err = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+		if err == nil {
+			return string(out), nil
+		}
+		if attempt < 3 {
+			time.Sleep(1500 * time.Millisecond)
+		}
+	}
+	return string(out), err
+}
+
 // blockIPv6Firewall adds a Windows Firewall rule blocking all outbound
 // IPv6 traffic (RemoteAddress ::/0), regardless of which interface it
 // would otherwise have gone out — see the IPv6 leak guard comment at its
@@ -534,19 +564,27 @@ func blockIPv6Firewall() error {
 			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -RemoteAddress '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' -Profile Any`,
 		ipv6FirewallRuleName,
 	)
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	out, err := runPowerShellWithRetry(script)
 	if err != nil {
-		return fmt.Errorf("New-NetFirewallRule: %w (%s)", err, string(out))
+		return fmt.Errorf("New-NetFirewallRule: %w (%s)", err, out)
 	}
 	return nil
 }
 
-// unblockIPv6Firewall removes the rule blockIPv6Firewall added.
+// unblockIPv6Firewall removes the rule blockIPv6Firewall added — called
+// unconditionally from Stop() regardless of which mode Start() ran in, so
+// on every split-tunnel disconnect (where blockIPv6Firewall was never
+// called in the first place, see Start()'s doc) the rule simply never
+// existed to begin with. That used to surface as a misleading
+// "could not remove outbound IPv6 block" warning on literally every
+// split-tunnel disconnect (confirmed live 2026-09-14) even though nothing
+// was actually wrong — SilentlyContinue here makes "already absent" the
+// expected, silent case instead of a reported failure.
 func unblockIPv6Firewall() error {
-	script := fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction Stop", ipv6FirewallRuleName)
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	script := fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue", ipv6FirewallRuleName)
+	out, err := runPowerShellWithRetry(script)
 	if err != nil {
-		return fmt.Errorf("Remove-NetFirewallRule: %w (%s)", err, string(out))
+		return fmt.Errorf("Remove-NetFirewallRule: %w (%s)", err, out)
 	}
 	return nil
 }
