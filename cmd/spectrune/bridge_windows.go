@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
@@ -48,6 +49,33 @@ const (
 	fwdMaxInFlt = 1024
 	bridgeAddr  = "10.99.0.1"
 )
+
+// procConvertInterfaceLuidToIndex resolves an interface's ifIndex from
+// its LUID — modiphlpapi is already declared in getpid_windows.go, same
+// package. netsh's "name=" parameter accepts a numeric index exactly
+// like a friendly name, and unlike the name, the index is fixed at
+// creation and never changes — which matters here specifically because
+// the *name* Windows actually assigns can differ from adapterName (see
+// Start's CreateAdapter fallback doc) and, worse, confirmed live
+// 2026-09-14, isn't settled yet even microseconds after creation:
+// ConvertInterfaceLuidToAlias queried right after CreateAdapter returned
+// the pre-rename name ("Spectrune") while Get-NetAdapter moments later
+// already showed the post-rename one ("Spectrune 1") — a race with no
+// stable name to resolve at all until some indeterminate point after
+// creation. The index has no such window.
+var procConvertInterfaceLuidToIndex = modiphlpapi.NewProc("ConvertInterfaceLuidToIndex")
+
+func adapterIndex(luid uint64) (uint32, error) {
+	var index uint32
+	ret, _, _ := procConvertInterfaceLuidToIndex.Call(
+		uintptr(unsafe.Pointer(&luid)),
+		uintptr(unsafe.Pointer(&index)),
+	)
+	if ret != 0 {
+		return 0, fmt.Errorf("ConvertInterfaceLuidToIndex: error code %d", ret)
+	}
+	return index, nil
+}
 
 // adapterGUID is passed to wintun.CreateAdapter on every Start() instead of
 // nil. A nil GUID tells Wintun to mint a brand-new random one each call, so
@@ -90,6 +118,13 @@ type Bridge struct {
 	sessionStarted bool
 	stack          *stack.Stack
 	ep             *channel.Endpoint
+
+	// ifaceAlias is the adapter's *actual* interface name, resolved from
+	// its LUID right after creation — usually adapterName, but can
+	// differ (see Start's doc comment on the CreateAdapter fallback), so
+	// Stop's own netsh cleanup needs this rather than assuming the
+	// constant.
+	ifaceAlias string
 
 	// closeFlag and pumpsDone coordinate a safe shutdown of the two pump
 	// goroutines before the Wintun session/adapter get closed — see Stop.
@@ -163,16 +198,53 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 	// outright against it ("Cannot create a file when that file already
 	// exists") rather than reusing it — confirmed live 2026-09-14, and
 	// previously worked around by rebooting the whole machine, which is
-	// not a reasonable thing to ask a user to do. OpenAdapter+Close
-	// cleans up exactly that leftover state before trying to create a
-	// fresh one; harmless no-op (OpenAdapter just fails, ignored) if
-	// there was nothing stale to begin with.
-	if stale, err := wintun.OpenAdapter(adapterName); err == nil {
-		log.Printf("found a stale %q adapter from an unclean previous shutdown, removing it", adapterName)
-		stale.Close()
+	// not a reasonable thing to ask a user to do.
+	//
+	// Also confirmed live the same day: a "failed" CreateAdapter call
+	// can still leave a real, working device behind at the OS level
+	// despite returning an error to us (its log even names a specific
+	// sub-step, "Failed to initiate stub device creation" — the device
+	// itself was already created by an earlier step). That device then
+	// collides with the *next* retry attempt exactly like a genuinely
+	// stale one would, so cleanup has to run before every attempt, not
+	// just once up front — otherwise each retry just compounds the mess
+	// (confirmed: chasing this the naive way left three live orphaned
+	// adapters — "Spectrune", "Spectrune 1", and a nil-GUID one — after
+	// one bad connect attempt).
+	var adapter *wintun.Adapter
+	for attempt := 1; attempt <= 4; attempt++ {
+		if stale, err := wintun.OpenAdapter(adapterName); err == nil {
+			log.Printf("attempt %d/4: found an existing %q adapter (stale, or left behind by the previous attempt), removing it", attempt, adapterName)
+			stale.Close()
+			// PnP device removal is asynchronous — confirmed live
+			// 2026-09-14 that CreateAdapter run immediately after
+			// Close() still fails with the same ERROR_ALREADY_EXISTS
+			// (0x800700B7) because Windows hadn't actually finished
+			// tearing down the old device yet.
+			time.Sleep(500 * time.Millisecond)
+		}
+		adapter, err = wintun.CreateAdapter(adapterName, tunnelType, &adapterGUID)
+		if err == nil {
+			break
+		}
+		log.Printf("CreateAdapter attempt %d/4 failed: %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
-
-	adapter, err := wintun.CreateAdapter(adapterName, tunnelType, &adapterGUID)
+	if err != nil {
+		// Give up on the fixed identity and let Windows mint a fresh
+		// random one (nil GUID) — better than leaving the user stuck
+		// requiring a manual pnputil/Device-Manager cleanup. The only
+		// real downside (per adapterGUID's own doc comment) is one
+		// extra Windows network-profile (NLA) entry, trivial next to
+		// "VPN refuses to connect at all." One last OpenAdapter+Close
+		// first, for the same reason as inside the loop above.
+		log.Printf("CreateAdapter still failing after retries, falling back to a fresh random adapter identity: %v", err)
+		if stale, oerr := wintun.OpenAdapter(adapterName); oerr == nil {
+			stale.Close()
+			time.Sleep(500 * time.Millisecond)
+		}
+		adapter, err = wintun.CreateAdapter(adapterName, tunnelType, nil)
+	}
 	if err != nil {
 		return b.failStart(fmt.Errorf("CreateAdapter: %w", err))
 	}
@@ -234,7 +306,26 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 
 	log.Printf("bridge up, gVisor address %s", testAddr)
 
-	if err := configureWindowsInterface(); err != nil {
+	// The adapter's actual interface name can differ from adapterName —
+	// confirmed live 2026-09-14: when the CreateAdapter fallback above
+	// (nil GUID) runs because a stale ghost device is still squatting on
+	// the *name* "Spectrune" too, not just its GUID, Windows renames the
+	// newly-created one (e.g. "Spectrune 1") to avoid that collision —
+	// and not even immediately: querying the name right after creation
+	// raced the rename and got the stale pre-rename answer. The index is
+	// fixed at creation with no such window, and netsh's "name=" accepts
+	// one exactly like a friendly name, so resolving that instead
+	// sidesteps the whole race.
+	ifIndex, err := adapterIndex(adapter.LUID())
+	alias := adapterName
+	if err != nil {
+		log.Printf("adapterIndex: %v, falling back to %q", err, adapterName)
+	} else {
+		alias = strconv.FormatUint(uint64(ifIndex), 10)
+	}
+	b.ifaceAlias = alias
+
+	if err := configureWindowsInterface(alias); err != nil {
 		// The pumps are already running at this point — go through the
 		// same teardown Stop() uses rather than a partial failStart, so
 		// they're stopped cleanly before the session/adapter close.
@@ -385,7 +476,11 @@ func (b *Bridge) closeStaleConns() {
 // successful Start.
 func (b *Bridge) Stop() {
 	log.Printf("stopping bridge, removing default route...")
-	exec.Command("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", adapterName).Run()
+	deleteRouteAlias := b.ifaceAlias
+	if deleteRouteAlias == "" {
+		deleteRouteAlias = adapterName
+	}
+	exec.Command("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", deleteRouteAlias).Run()
 	if err := unblockIPv6Firewall(); err != nil {
 		log.Printf("warning: could not remove outbound IPv6 block: %v", err)
 	}
@@ -456,10 +551,10 @@ func unblockIPv6Firewall() error {
 	return nil
 }
 
-func configureWindowsInterface() error {
+func configureWindowsInterface(alias string) error {
 	cmds := [][]string{
-		{"netsh", "interface", "ipv4", "set", "address", "name=" + adapterName, "static", bridgeAddr, "255.255.255.0"},
-		{"netsh", "interface", "ipv4", "add", "route", "0.0.0.0/0", adapterName, "metric=1"},
+		{"netsh", "interface", "ipv4", "set", "address", "name=" + alias, "static", bridgeAddr, "255.255.255.0"},
+		{"netsh", "interface", "ipv4", "add", "route", "0.0.0.0/0", alias, "metric=1"},
 	}
 	for _, c := range cmds {
 		out, err := exec.Command(c[0], c[1:]...).CombinedOutput()
