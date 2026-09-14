@@ -214,7 +214,15 @@ func recordUpdateCheck() {
 }
 
 func fetchLatestRelease() (*ghRelease, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	// 10s used to time out routinely for a real user whose path to
+	// api.github.com is just slow/marginal rather than actually down —
+	// confirmed live 2026-09-14 via repeated "context deadline exceeded
+	// (Client.Timeout exceeded while awaiting headers)" log entries
+	// spanning a long stretch of time, not a one-off blip. 25s gives a
+	// slow path a fair chance without the manual "Check for updates"
+	// button (the only place this delay is visibly blocking) feeling
+	// broken.
+	client := &http.Client{Timeout: 25 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, latestReleaseURL, nil)
 	if err != nil {
 		return nil, err
