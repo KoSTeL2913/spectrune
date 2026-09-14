@@ -1,3 +1,42 @@
 #pragma code_page(65001)
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST manifest.xml
 1 ICON "assets/app.ico"
+
+// VERSIONINFO — without this, spectrune.exe carries no file version at
+// all, and Windows Installer falls back to comparing unversioned files
+// by date/size during an upgrade. Confirmed live 2026-09-14: a real
+// self-update install completed (exit 0, product registered at the new
+// ProductVersion in Add/Remove Programs) but silently left the OLD
+// spectrune.exe in place — MSI decided the "new" file wasn't newer
+// since the old one's date/size looked close enough, so the running
+// code stayed on 2.0.2.0 for weeks of releases while every MSI kept
+// reporting success. FILEVERSION/PRODUCTVERSION below MUST be bumped
+// by hand to match version.go's appVersion on every release (same
+// manual-sync requirement installer/spectrune.wxs's ProductVersion
+// already has — there's no single source of truth across the three),
+// then resources_amd64.syso regenerated with:
+//   x86_64-w64-mingw32-windres resources.rc -O coff -o resources_amd64.syso
+1 VERSIONINFO
+FILEVERSION 2,0,8,0
+PRODUCTVERSION 2,0,8,0
+FILEOS 0x40004
+FILETYPE 0x1
+{
+BLOCK "StringFileInfo"
+{
+    BLOCK "040904b0"
+    {
+        VALUE "CompanyName", "Spectrune"
+        VALUE "FileDescription", "Spectrune"
+        VALUE "FileVersion", "2.0.8.0"
+        VALUE "InternalName", "spectrune"
+        VALUE "OriginalFilename", "spectrune.exe"
+        VALUE "ProductName", "Spectrune"
+        VALUE "ProductVersion", "2.0.8.0"
+    }
+}
+BLOCK "VarFileInfo"
+{
+    VALUE "Translation", 0x409, 1200
+}
+}
