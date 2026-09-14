@@ -98,7 +98,7 @@ const (
 )
 
 // setWindowIconFromResource sets hwnd's title-bar/Alt-Tab icon to icon
-// resource 1 (the branded "A" mark embedded via resources.rc → app.ico —
+// resource 1 (the branded "S" mark embedded via resources.rc → app.ico —
 // see the ICON line there). go-webview2 registers its own window class
 // with no icon of its own, so without this the title bar shows a blank/
 // generic icon even though the taskbar and Explorer already pick up the
