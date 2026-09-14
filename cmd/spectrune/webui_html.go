@@ -140,6 +140,8 @@ const webUIHTML = `<!DOCTYPE html>
   .status-text.connecting { color: #b8860b; }
   .status-text.connecting::before { background: #e6b422; box-shadow: 0 0 0 3px rgba(230,180,34,.22); }
   .status-text.disconnected { color: var(--muted); }
+  .status-text.disconnected.error { color: #e5484d; }
+  .status-text.disconnected.error::before { background: #e5484d; box-shadow: 0 0 0 3px rgba(229,72,77,.22); }
   label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
   input[type=text], textarea {
     width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
@@ -520,6 +522,7 @@ var I18N = {
     domainsNewList: '+ New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
     domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
     domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "+ New list…" to create one.',
+    connectionError: 'Connection error. Unavailable.',
   },
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
@@ -569,6 +572,7 @@ var I18N = {
     domainsNewList: '+ Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
     domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
     domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «+ Новый список…», чтобы создать.',
+    connectionError: 'Ошибка подключения. Недоступен.',
   },
 };
 
@@ -590,6 +594,10 @@ function renderUpdateStatus() {
   $('update-status-text').textContent = tf('updateVersionLine', appVersionStr);
 }
 
+// How long to wait for a handshake before giving up and reporting an
+// error instead of sitting on "Connecting…" forever — see refreshStatus.
+var CONNECT_TIMEOUT_MS = 20000;
+
 var state = {
   profiles: [],
   selected: null,
@@ -600,6 +608,14 @@ var state = {
   connected: false,
   connectedProfile: '',
   handshakeOK: false,
+  // connectStartedAt/connectError back the "give up and say so" timeout in
+  // refreshStatus below — a dead/blocked server (e.g. a router whitelist
+  // that only lets specific traffic out) used to leave the UI on
+  // "Connecting…" forever with no way to tell the two apart, and left the
+  // bridge's own default-route override in place indefinitely too. Reported
+  // 2026-09-14.
+  connectStartedAt: null,
+  connectError: false,
   editingExisting: false,
   installedApps: [],
   includedApps: [],   // lowercase path -> path, preserved case
@@ -700,6 +716,8 @@ function toggleConnectRow(name) {
   } else if (state.connected) {
     p = disconnect().then(function() { return connect(name); });
   } else {
+    state.connectError = false;
+    state.connectStartedAt = null;
     p = connect(name);
   }
   p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); });
@@ -728,6 +746,10 @@ function updateButtons() {
     $('status-text').className = 'status-text connecting';
     $('btn-connect').textContent = t('disconnect');
     if (!state.connectBusy) $('btn-connect').disabled = false;
+  } else if (state.connectError) {
+    $('status-text').textContent = t('connectionError');
+    $('status-text').className = 'status-text disconnected error';
+    $('btn-connect').textContent = t('connect');
   } else {
     $('status-text').textContent = t('disconnected');
     $('status-text').className = 'status-text disconnected';
@@ -901,8 +923,46 @@ function refreshStatus() {
     state.connected = s.Connected;
     state.connectedProfile = s.ProfileName;
     state.handshakeOK = s.HandshakeOK;
-    updateButtons();
-    renderProfileList();
+
+    if (!state.connected || state.handshakeOK) {
+      // Either fully connected or fully disconnected — no pending
+      // handshake to time out, so nothing to track.
+      state.connectStartedAt = null;
+      updateButtons();
+      renderProfileList();
+      return;
+    }
+
+    // Connected == bridge/adapter is up, but no WireGuard handshake yet.
+    // That's normal for the first few seconds of every connect, but a
+    // server that's actually unreachable (wrong endpoint, or — reported
+    // 2026-09-14 — a router that whitelists only specific traffic and
+    // blocks the rest) leaves it here forever with no way to distinguish
+    // "still trying" from "never going to work", and leaves the bridge's
+    // default-route override sitting on a dead tunnel the whole time.
+    // Give it a fixed window, then give up: disconnect (restoring normal
+    // routing) and say so plainly instead of hanging on "Connecting…".
+    if (!state.connectStartedAt) state.connectStartedAt = Date.now();
+    if (Date.now() - state.connectStartedAt < CONNECT_TIMEOUT_MS) {
+      updateButtons();
+      renderProfileList();
+      return;
+    }
+
+    state.connectStartedAt = null;
+    state.connectError = true;
+    state.connectBusy = true;
+    disconnect().then(function() {
+      return getState();
+    }).then(function(s2) {
+      state.connected = s2.Connected;
+      state.connectedProfile = s2.ProfileName;
+      state.handshakeOK = s2.HandshakeOK;
+    }).catch(showListError).finally(function() {
+      state.connectBusy = false;
+      updateButtons();
+      renderProfileList();
+    });
   }).catch(showListError);
 }
 
@@ -986,6 +1046,7 @@ $('btn-domains').onclick = function() {
 $('btn-connect').onclick = function() {
   if (state.connectBusy) return; // already in flight — ignore a second click
   state.connectBusy = true;
+  if (!state.connected) { state.connectError = false; state.connectStartedAt = null; }
   $('btn-connect').disabled = true;
   var p = state.connected ? disconnect() : connect(state.selected);
   p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
