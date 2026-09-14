@@ -111,6 +111,22 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 		}
 	}
 
+	// WireGuard only initiates a handshake once there's an actual packet
+	// to send — it never happens just because the device came up. In
+	// split-tunnel mode that packet doesn't exist until the user opens
+	// one of the selected apps, so without this, hasHandshake() (and
+	// thus the "Connected" status) can sit on "Connecting…" indefinitely
+	// even though the tunnel is otherwise completely healthy — reported
+	// 2026-09-14 as "says Connecting even though everything's fine,
+	// and it flips to Connected as soon as I launch the VPN'd app".
+	// SendKeepalive queues an empty packet and immediately flushes it,
+	// which kicks off the same handshake a real packet would have.
+	for _, p := range cfg.Peers {
+		if peer := dev.LookupPeer(device.NoisePublicKey(p.PublicKey)); peer != nil {
+			peer.SendKeepalive()
+		}
+	}
+
 	included := make(map[string]bool, len(cfg.Interface.IncludedApps))
 	for _, p := range cfg.Interface.IncludedApps {
 		included[strings.ToLower(filepath.Clean(p))] = true

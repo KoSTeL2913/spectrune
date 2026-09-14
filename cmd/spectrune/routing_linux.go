@@ -32,6 +32,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -146,6 +147,24 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 		return fmt.Errorf("Up: %w", err)
 	}
 	b.dev = dev
+
+	// WireGuard only initiates a handshake once there's an actual packet
+	// to send — never just because the device came up. Since nothing is
+	// in the cgroup yet at this point (matchLoop hasn't moved any process
+	// into it), that packet doesn't exist until the user opens one of the
+	// selected apps, so without this, HandshakeOK() (and thus the
+	// "Connected" status) can sit on "Connecting…" indefinitely even
+	// though the tunnel is otherwise completely healthy — same bug
+	// reported on Windows 2026-09-14, same fix: proactively queue an
+	// empty keepalive packet, which kicks off the same handshake a real
+	// packet would have.
+	if pubBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cfg.PeerPublicKey)); err == nil && len(pubBytes) == 32 {
+		var pub device.NoisePublicKey
+		copy(pub[:], pubBytes)
+		if peer := dev.LookupPeer(pub); peer != nil {
+			peer.SendKeepalive()
+		}
+	}
 
 	steps := [][]string{
 		{"ip", "addr", "add", cfg.Address, "dev", tunName},
