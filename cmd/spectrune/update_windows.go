@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,13 @@ import (
 // GitHub API needs no auth token here (would otherwise mean embedding a
 // credential in a distributed .exe).
 const latestReleaseURL = "https://api.github.com/repos/KoSTeL2913/spectrune/releases/latest"
+
+// updateInProgress mirrors update_linux.go's flag of the same name — the
+// GUI's background poll (webui_html.go's checkBackgroundUpdate, via
+// Bridge.UpdateInProgress in service_windows.go) uses it to show an
+// honest "installing update" overlay instead of a bare IPC connection
+// error while msiexec stops and restarts this very service.
+var updateInProgress atomic.Bool
 
 // updateCheckThrottle keeps repeated GUI launches in the same sitting from
 // re-hitting the GitHub API every time — unauthenticated requests are
@@ -143,6 +151,8 @@ func installRelease(release *ghRelease) {
 	}
 
 	log.Printf("update check: %s available (running %s), downloading", release.TagName, appVersion)
+	updateInProgress.Store(true)
+	defer updateInProgress.Store(false)
 	path, err := downloadUpdate(msiURL)
 	if err != nil {
 		log.Printf("update check: download failed: %v", err)

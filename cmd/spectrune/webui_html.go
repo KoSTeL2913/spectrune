@@ -265,6 +265,22 @@ const webUIHTML = `<!DOCTYPE html>
   }
   .confirm-message { font-size: 13.5px; line-height: 1.5; }
   button.primary.danger { background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); }
+  /* Indeterminate progress bar for update-installing-overlay — there's no
+     real byte/step progress to report (download size and dpkg/msiexec
+     both run opaque to the GUI), so this only needs to read as "still
+     working," not track an actual percentage. */
+  .progress-track {
+    margin-top: 14px; height: 4px; border-radius: 2px; overflow: hidden;
+    background: var(--border);
+  }
+  .progress-fill {
+    height: 100%; width: 40%; border-radius: 2px; background: var(--grad);
+    animation: progress-indeterminate 1.3s ease-in-out infinite;
+  }
+  @keyframes progress-indeterminate {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
 </style>
 </head>
 <body>
@@ -449,6 +465,23 @@ const webUIHTML = `<!DOCTYPE html>
 
 <div class="version-tag">v%%VERSION%%</div>
 
+<!--
+  Shown by checkBackgroundUpdate's background poll (below) the moment an
+  automatic self-update starts downloading/installing — not just after a
+  manual "Check for updates" click. Without this, the only visible sign
+  of an automatic update used to be refreshStatus's raw IPC connection
+  error the instant dpkg/msiexec restarts the daemon/service, which
+  looked like a real failure (reported 2026-09-14). z-index 1000 (same
+  as confirm-overlay) covers that error text underneath for the whole
+  outage window.
+-->
+<div id="update-installing-overlay" class="confirm-overlay" style="display:none">
+  <div class="confirm-box">
+    <div class="confirm-message" data-i18n="updateInstallingOverlay">Installing an update. Spectrune will restart automatically…</div>
+    <div class="progress-track"><div class="progress-fill"></div></div>
+  </div>
+</div>
+
 <div id="confirm-overlay" class="confirm-overlay" style="display:none">
   <div class="confirm-box">
     <div id="confirm-message" class="confirm-message"></div>
@@ -500,6 +533,7 @@ var I18N = {
     updateAvailable: 'Updating to %s…', updateCheckFailed: 'Update check failed: %s',
     updateRestarting: 'Update installed — restarting…',
     updateStillInstalling: 'Still installing — reopen the app in a moment.',
+    updateInstallingOverlay: 'Installing an update. Spectrune will restart automatically…',
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
     presetLoad: 'Load', presetSaveAs: 'Save as…', presetDelete: 'Delete',
@@ -550,6 +584,7 @@ var I18N = {
     updateAvailable: 'Обновление до %s…', updateCheckFailed: 'Ошибка проверки: %s',
     updateRestarting: 'Обновление установлено — перезапуск…',
     updateStillInstalling: 'Ещё устанавливается — откройте приложение чуть позже.',
+    updateInstallingOverlay: 'Устанавливается обновление. Spectrune перезапустится автоматически…',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
     presetLoad: 'Загрузить', presetSaveAs: 'Сохранить как…', presetDelete: 'Удалить',
@@ -1708,6 +1743,12 @@ function pollForRestart(previousVersion, deadline) {
   if (Date.now() > deadline) {
     $('update-status-text').textContent = t('updateStillInstalling');
     $('btn-check-update').disabled = false;
+    // Also used by checkBackgroundUpdate below — an automatic update
+    // that's still not done after the deadline (or genuinely failed,
+    // e.g. a bad download) shouldn't leave the user staring at the
+    // overlay forever with no way back into the app.
+    $('update-installing-overlay').style.display = 'none';
+    backgroundUpdateHandled = false;
     return;
   }
   getRunningVersion().then(function(v) {
@@ -1719,6 +1760,30 @@ function pollForRestart(previousVersion, deadline) {
     }
   }).catch(function() {
     setTimeout(function() { pollForRestart(previousVersion, deadline); }, 1500);
+  });
+}
+// checkBackgroundUpdate polls Bridge.UpdateInProgress (via
+// getUpdateInProgress) so an *automatic* self-update — triggered on GUI
+// launch or the once-an-hour background check, not just a manual "Check
+// for updates" click — gets the same honest "installing" UI instead of
+// refreshStatus's raw connection-error banner the moment dpkg/msiexec
+// restarts the daemon/service. Piggybacks on the same 3s cadence as
+// refreshStatus below. backgroundUpdateHandled latches once shown so a
+// still-installing update doesn't re-trigger this every tick; reset by
+// pollForRestart above once that poll gives up or succeeds.
+var backgroundUpdateHandled = false;
+function checkBackgroundUpdate() {
+  if (backgroundUpdateHandled) return;
+  getUpdateInProgress().then(function(installing) {
+    if (installing && !backgroundUpdateHandled) {
+      backgroundUpdateHandled = true;
+      $('update-installing-overlay').style.display = 'flex';
+      pollForRestart(appVersionStr, Date.now() + 120000);
+    }
+  }).catch(function() {
+    // Daemon unreachable or an old build without this RPC — nothing
+    // useful to show yet; refreshStatus's own error path still covers
+    // a genuine, non-update outage.
   });
 }
 $('btn-check-update').onclick = function() {
@@ -1768,6 +1833,7 @@ applyI18n();
 refreshProfiles();
 refreshStatus();
 setInterval(refreshStatus, 3000);
+setInterval(checkBackgroundUpdate, 3000);
 </script>
 </body>
 </html>`

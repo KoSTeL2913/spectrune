@@ -30,10 +30,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const latestReleaseURL = "https://api.github.com/repos/KoSTeL2913/spectrune/releases/latest"
+
+// updateInProgress lets the GUI's background poll (webui_html.go's
+// checkBackgroundUpdate, via Bridge.UpdateInProgress in service_linux.go)
+// show an honest "installing update" overlay instead of a bare IPC
+// connection error the moment dpkg -i restarts this very daemon. Zero
+// value (false) is correct both normally and for the freshly-restarted
+// process after a successful install — the defer in installRelease only
+// needs to fire on a failure path that leaves this same process running.
+var updateInProgress atomic.Bool
 
 const updateCheckThrottle = time.Hour
 
@@ -147,6 +157,8 @@ func installRelease(release *ghRelease) {
 	}
 
 	log.Printf("update check: %s available (running %s), downloading", release.TagName, appVersion)
+	updateInProgress.Store(true)
+	defer updateInProgress.Store(false)
 	path, err := downloadUpdate(debURL)
 	if err != nil {
 		log.Printf("update check: download failed: %v", err)

@@ -339,6 +339,27 @@ func bindAPI(w webview.WebView) {
 		return version, nil
 	}))
 
+	// getUpdateInProgress backs the "installing update" overlay
+	// (webui_html.go's checkBackgroundUpdate, polled continuously in the
+	// background, not just after a manual "Check for updates" click) —
+	// a connection failure here is treated the same as "not installing"
+	// by the JS side, since by the time the daemon is actually
+	// unreachable (mid dpkg -i) the overlay should already be showing
+	// from the last successful poll that caught updateInProgress==true
+	// during the download phase.
+	must(w.Bind("getUpdateInProgress", func() (bool, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return false, err
+		}
+		defer client.Close()
+		var installing bool
+		if err := client.Call("Bridge.UpdateInProgress", struct{}{}, &installing); err != nil {
+			return false, err
+		}
+		return installing, nil
+	}))
+
 	// restartApp relaunches the GUI process — called once the update-
 	// check poll above confirms the daemon is actually running the new
 	// version, so the user sees it reflected immediately instead of the

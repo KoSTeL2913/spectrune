@@ -88,6 +88,17 @@ func (s *Service) Version(_ struct{}, reply *string) error {
 	return nil
 }
 
+// UpdateInProgress backs the GUI's background poll (webui_html.go's
+// checkBackgroundUpdate) — lets it show an honest "installing update"
+// overlay instead of a bare connection error while an automatic
+// self-update is downloading/installing (update_linux.go's
+// updateInProgress flag), including the window where dpkg -i is about to
+// restart this very daemon.
+func (s *Service) UpdateInProgress(_ struct{}, reply *bool) error {
+	*reply = updateInProgress.Load()
+	return nil
+}
+
 func (s *Service) ListProfiles(_ struct{}, reply *[]string) error {
 	names, err := listProfileNames()
 	if err != nil {
