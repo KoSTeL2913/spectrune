@@ -125,18 +125,27 @@ const webUIHTML = `<!DOCTYPE html>
   .profile-row-status.error { color: #e5484d; }
   .profile-row-routing { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
   .profile-row-connect {
-    flex: 1 1 0; min-width: 0; margin-left: 10px; padding: 6px 10px;
+    flex: 1 1 0; min-width: 0; margin-left: 10px;
     display: flex; align-items: center; justify-content: center;
-    border-radius: 8px; cursor: pointer; font-size: 12.5px; font-weight: 600;
-    color: var(--muted); opacity: 0; pointer-events: none;
-    transition: opacity .12s ease, background .12s ease, color .12s ease;
+    cursor: pointer; opacity: 0; pointer-events: none;
+    transition: opacity .12s ease;
   }
   .profile-row:hover .profile-row-connect { opacity: 1; pointer-events: auto; }
-  .profile-row-connect:hover { background: var(--chip-hover); color: var(--ink); }
-  .profile-row-connect.active { color: #e5484d; }
-  .profile-row-connect.active:hover { background: rgba(229,72,77,.14); }
-  .profile-row-connect:not(.active):hover { color: var(--accent); }
   .profile-row-connect.busy { opacity: .5 !important; pointer-events: none !important; }
+  /* The actual pill button inside that half — kept as its own element
+     (rather than styling profile-row-connect itself) so the click *zone*
+     stays half the row while the *button* it shows reads as an actual
+     button, not just a color change on plain text. */
+  .profile-row-connect-btn {
+    padding: 6px 20px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink);
+    transition: background .12s ease, border-color .12s ease, color .12s ease, filter .12s ease;
+  }
+  .profile-row-connect:hover .profile-row-connect-btn { background: var(--grad); color: #fff; border-color: transparent; filter: brightness(1.1); }
+  .profile-row-connect.active .profile-row-connect-btn { color: #e5484d; border-color: rgba(229,72,77,.4); }
+  .profile-row-connect.active:hover .profile-row-connect-btn {
+    background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); color: #fff; border-color: transparent;
+  }
   .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; flex-shrink: 0; }
   button {
     padding: 7px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--chip-bg);
@@ -147,6 +156,18 @@ const webUIHTML = `<!DOCTYPE html>
   button:disabled:hover { background: var(--chip-bg); }
   button.primary { background: var(--grad); color: white; border-color: transparent; font-weight: 600; }
   button.primary:hover { filter: brightness(1.12); }
+  /* Bottom status line — just a readout now (see profile-row-connect for
+     the actual per-row Connect/Disconnect action), no button of its own. */
+  .status-line { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .status-text { font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .status-text::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #8a879c; flex-shrink: 0; }
+  .status-text.connected { color: #1fae7a; }
+  .status-text.connected::before { background: #2ee6a0; box-shadow: 0 0 0 3px rgba(46,230,160,.22); }
+  .status-text.connecting { color: #b8860b; }
+  .status-text.connecting::before { background: #e6b422; box-shadow: 0 0 0 3px rgba(230,180,34,.22); }
+  .status-text.disconnected { color: var(--muted); }
+  .status-text.disconnected.error { color: #e5484d; }
+  .status-text.disconnected.error::before { background: #e5484d; box-shadow: 0 0 0 3px rgba(229,72,77,.22); }
   label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
   input[type=text], textarea {
     width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
@@ -380,6 +401,9 @@ const webUIHTML = `<!DOCTYPE html>
     <button id="btn-domains" disabled data-i18n="domains">Domains…</button>
     <button id="btn-delete" disabled data-i18n="delete">Delete</button>
   </div>
+  <div class="status-line">
+    <span id="status-text" class="status-text disconnected"></span>
+  </div>
   <div id="included-apps-row" class="included-apps" style="display:none"></div>
 </div>
 
@@ -508,6 +532,8 @@ const webUIHTML = `<!DOCTYPE html>
 var I18N = {
   en: {
     add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
+    connected: 'Connected: %s', disconnected: 'Disconnected', connecting: 'Connecting to %s…',
+    connectionError: 'Connection error. Unavailable.',
     connectedShort: 'Connected', connectingShort: 'Connecting…', errorShort: 'Error',
     routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d',
     connect: 'Connect', disconnect: 'Disconnect',
@@ -554,6 +580,8 @@ var I18N = {
   },
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
+    connected: 'Подключено: %s', disconnected: 'Отключено', connecting: 'Подключение к %s…',
+    connectionError: 'Ошибка подключения. Недоступен.',
     connectedShort: 'Подключено', connectingShort: 'Подключение…', errorShort: 'Ошибка',
     routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d',
     connect: 'Подключить', disconnect: 'Отключить',
@@ -722,12 +750,16 @@ function renderProfileList() {
     info.onclick = function() { state.selected = name; renderProfileList(); updateButtons(); };
 
     // profile-row-connect is the row's right half — see its CSS doc for
-    // why this replaced a small hover-only button. A plain div, not a
-    // button, since it's sized and clicked as half the row rather than a
-    // button-shaped control.
+    // why this replaced a small hover-only button. The half itself is a
+    // plain clickable div (sized as half the row), but it holds an
+    // actual pill-shaped button element so it still *reads* as a real
+    // Connect/Disconnect button, not just colored text.
     var connectZone = document.createElement('div');
     connectZone.className = 'profile-row-connect' + (isActive ? ' active' : '') + (state.connectBusy ? ' busy' : '');
-    connectZone.textContent = isActive ? t('disconnect') : t('connect');
+    var connectBtnInner = document.createElement('span');
+    connectBtnInner.className = 'profile-row-connect-btn';
+    connectBtnInner.textContent = isActive ? t('disconnect') : t('connect');
+    connectZone.appendChild(connectBtnInner);
     connectZone.onclick = function(e) {
       e.stopPropagation();
       toggleConnectRow(name);
@@ -775,6 +807,27 @@ function updateButtons() {
   $('btn-apps').disabled = !has;
   $('btn-domains').disabled = !has;
   $('btn-delete').disabled = !has;
+  // Readout only — see profile-row-connect for the actual per-row
+  // Connect/Disconnect action, there's no button down here any more.
+  if (state.connected && state.handshakeOK) {
+    $('status-text').textContent = tf('connected', state.connectedProfile);
+    $('status-text').className = 'status-text connected';
+  } else if (state.connected) {
+    // Adapter/local bridge is up but the WireGuard handshake with the
+    // peer hasn't completed (or never will, for a bad config/dead
+    // server) — see StateReply.HandshakeOK's doc in service.go. Used to
+    // just say "Connected" here regardless, which was actively
+    // misleading: confirmed live 2026-09-04 with a profile whose tunnel
+    // never actually passed traffic.
+    $('status-text').textContent = tf('connecting', state.connectedProfile);
+    $('status-text').className = 'status-text connecting';
+  } else if (state.connectError) {
+    $('status-text').textContent = t('connectionError');
+    $('status-text').className = 'status-text disconnected error';
+  } else {
+    $('status-text').textContent = t('disconnected');
+    $('status-text').className = 'status-text disconnected';
+  }
   // Same colored-when-connected / grey-when-disconnected swap as the tray
   // icon (tray.go) and the Linux awg-gui counterpart's AppIndicator —
   // colored only once the handshake actually confirms the tunnel works.
