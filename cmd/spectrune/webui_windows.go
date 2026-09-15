@@ -538,24 +538,80 @@ func bindAPI(w webview2.WebView) {
 	// regardless. alreadyDone is checkBackgroundUpdate's fallback path
 	// (JS side): the service's version was already observed to differ
 	// from this page's own, meaning the install is confirmed finished
-	// already — so the task fires almost immediately (just enough slack
-	// for this window's own DestroyWindow to release the single-instance
-	// mutex) instead of the full 25s meant to outlast a still-running
-	// msiexec.
+	// already — no install race left to wait out.
 	must(w.Bind("closeForUpdate", func(delayMs int, alreadyDone bool) error {
 		exePath, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		relaunchDelay := 25 * time.Second
+		var createArgs []string
 		if alreadyDone {
-			relaunchDelay = 2 * time.Second
-		}
-		triggerTime := time.Now().Add(relaunchDelay).Format("15:04:05")
-		createArgs := []string{
-			"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-			"/tr", fmt.Sprintf(`"%s" /gui-restart`, exePath),
-			"/sc", "once", "/st", triggerTime, "/it", "/f",
+			// Nothing left to wait for — just enough slack for this
+			// window's own DestroyWindow to release the single-instance
+			// mutex before /gui-restart tries to reacquire it.
+			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
+			createArgs = []string{
+				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
+				"/tr", fmt.Sprintf(`"%s" /gui-restart`, exePath),
+				"/sc", "once", "/st", triggerTime, "/it", "/f",
+			}
+		} else {
+			// A fixed delay here (tried first, shipped in 2.0.9.0-
+			// 2.0.12.0) was a guess at how long msiexec takes, and
+			// guessed wrong often enough to matter: reported live
+			// 2026-09-15 as "sometimes reopens the old version" — the
+			// scheduled relaunch fired before msiexec had actually
+			// replaced the exe yet, so /gui-restart launched whatever
+			// was still on disk at that moment.
+			//
+			// Poll instead, adapting to how long the install actually
+			// takes. Crucially this polls via PowerShell, never by
+			// running spectrune.exe itself — launching the target exe
+			// early to check on it would recreate the exact file lock
+			// this whole mechanism exists to avoid. Waits for BOTH the
+			// service to report Running again AND the exe's own
+			// LastWriteTime to have actually changed from its value
+			// right now (belt and suspenders — a service can restart
+			// without the file having actually been replaced yet, e.g.
+			// a stray earlier restart racing with this one), falling
+			// back to launching anyway once the poll gives up after
+			// ~80s so a genuinely stuck install doesn't leave the GUI
+			// gone forever.
+			stateDir, dirErr := updateStateDir()
+			if dirErr != nil {
+				return dirErr
+			}
+			if err := os.MkdirAll(stateDir, 0o755); err != nil {
+				return err
+			}
+			before := time.Now()
+			if fi, statErr := os.Stat(exePath); statErr == nil {
+				before = fi.ModTime()
+			}
+			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
+			script := fmt.Sprintf(
+				"$exe = '%s'\r\n"+
+					"$before = [datetime]'%s'\r\n"+
+					"for ($i = 0; $i -lt 40; $i++) {\r\n"+
+					"    Start-Sleep -Seconds 2\r\n"+
+					"    try {\r\n"+
+					"        $svc = Get-Service SpectruneService -ErrorAction Stop\r\n"+
+					"        $now = (Get-Item $exe -ErrorAction Stop).LastWriteTime\r\n"+
+					"        if ($svc.Status -eq 'Running' -and $now -ne $before) { break }\r\n"+
+					"    } catch {}\r\n"+
+					"}\r\n"+
+					"Start-Process -FilePath $exe -ArgumentList '/gui-restart'\r\n",
+				exePath, before.Format("2006-01-02T15:04:05.0000000"),
+			)
+			if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+				return err
+			}
+			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
+			createArgs = []string{
+				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
+				"/tr", fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "%s"`, scriptPath),
+				"/sc", "once", "/st", triggerTime, "/it", "/f",
+			}
 		}
 		if out, err := exec.Command("schtasks", createArgs...).CombinedOutput(); err != nil {
 			return fmt.Errorf("schtasks /create: %w (%s)", err, string(out))
