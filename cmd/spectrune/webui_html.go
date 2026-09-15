@@ -716,6 +716,7 @@ function renderProfileList() {
   state.profiles.forEach(function(name) {
     var li = document.createElement('li');
     li.className = 'profile-row';
+    li.dataset.name = name; // looked up by updateProfileRowStates below
     if (name === state.selected) li.classList.add('selected');
 
     var info = document.createElement('div');
@@ -747,7 +748,7 @@ function renderProfileList() {
     info.appendChild(nameEl);
     info.appendChild(statusEl);
     info.appendChild(routingEl);
-    info.onclick = function() { state.selected = name; renderProfileList(); updateButtons(); };
+    info.onclick = function() { state.selected = name; updateProfileRowStates(); };
 
     // profile-row-connect is the row's right half — see its CSS doc for
     // why this replaced a small hover-only button. The half itself is a
@@ -773,6 +774,45 @@ function renderProfileList() {
   refreshIncludedAppsPreview();
 }
 
+// updateProfileRowStates patches the already-rendered <li> elements in
+// place (selected highlight, per-row status label, connect zone's
+// active/busy class and button text) instead of calling renderProfileList
+// and rebuilding the whole list from scratch. This matters a lot more
+// than it looks: refreshStatus's 3s poll used to call renderProfileList
+// unconditionally, which clears and rebuilds the whole <ul> — including
+// whichever row the mouse happened to be hovering. WebView2
+// (Windows) doesn't retroactively apply :hover to a brand-new element
+// under an unmoved cursor the way GTK WebKit (Linux) does, so every 3s
+// tick made the hovered row's connect button flicker out and back —
+// reported live 2026-09-15, Windows-only, "flickers on long hover".
+// Only call full renderProfileList() when state.profiles itself changes
+// (add/delete/rename) or the language switches — anything that's purely
+// a connection-state or selection change should come through here.
+function updateProfileRowStates() {
+  Array.prototype.forEach.call($('profile-list').children, function(li) {
+    var name = li.dataset.name;
+    if (name === undefined) return; // the "no profiles" empty placeholder
+    li.classList.toggle('selected', name === state.selected);
+    var isActive = state.connected && state.connectedProfile === name;
+    var statusEl = li.querySelector('.profile-row-status');
+    if (isActive) {
+      statusEl.textContent = state.handshakeOK ? t('connectedShort') : t('connectingShort');
+      statusEl.className = 'profile-row-status ' + (state.handshakeOK ? 'connected' : 'connecting');
+    } else if (name === state.lastConnectErrorProfile) {
+      statusEl.textContent = t('errorShort');
+      statusEl.className = 'profile-row-status error';
+    } else {
+      statusEl.textContent = '';
+      statusEl.className = 'profile-row-status';
+    }
+    var connectZone = li.querySelector('.profile-row-connect');
+    connectZone.classList.toggle('active', isActive);
+    connectZone.classList.toggle('busy', state.connectBusy);
+    connectZone.querySelector('.profile-row-connect-btn').textContent = isActive ? t('disconnect') : t('connect');
+  });
+  updateButtons();
+}
+
 // toggleConnectRow is the row's right-half connect/disconnect zone (see
 // its CSS doc — this is now the only way to connect, there's no separate
 // bottom Connect button any more) — disconnect if this row is the active
@@ -785,7 +825,7 @@ function renderProfileList() {
 function toggleConnectRow(name) {
   if (state.connectBusy) return;
   state.connectBusy = true;
-  renderProfileList();
+  updateProfileRowStates();
   var p;
   if (state.connected && state.connectedProfile === name) {
     p = disconnect();
@@ -798,7 +838,7 @@ function toggleConnectRow(name) {
     p = connect(name);
   }
   p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
-    .finally(function() { state.connectBusy = false; renderProfileList(); });
+    .finally(function() { state.connectBusy = false; updateProfileRowStates(); });
 }
 
 function updateButtons() {
@@ -1001,8 +1041,7 @@ function refreshStatus() {
       // Either fully connected or fully disconnected — no pending
       // handshake to time out, so nothing to track.
       state.connectStartedAt = null;
-      updateButtons();
-      renderProfileList();
+      updateProfileRowStates();
       return;
     }
 
@@ -1017,8 +1056,7 @@ function refreshStatus() {
     // routing) and say so plainly instead of hanging on "Connecting…".
     if (!state.connectStartedAt) state.connectStartedAt = Date.now();
     if (Date.now() - state.connectStartedAt < CONNECT_TIMEOUT_MS) {
-      updateButtons();
-      renderProfileList();
+      updateProfileRowStates();
       return;
     }
 
@@ -1027,8 +1065,8 @@ function refreshStatus() {
     // Captured before the disconnect+getState below overwrites
     // connectedProfile — this is now the only record of which row to
     // flag, since there's no bottom status bar to show a generic
-    // (unattributed) error in any more. See renderProfileList's use of
-    // this for the per-row "Ошибка"/"Error" label.
+    // (unattributed) error in any more. See updateProfileRowStates's use
+    // of this for the per-row "Ошибка"/"Error" label.
     state.lastConnectErrorProfile = state.connectedProfile;
     state.connectBusy = true;
     disconnect().then(function() {
@@ -1039,8 +1077,7 @@ function refreshStatus() {
       state.handshakeOK = s2.HandshakeOK;
     }).catch(showListError).finally(function() {
       state.connectBusy = false;
-      updateButtons();
-      renderProfileList();
+      updateProfileRowStates();
     });
   }).catch(showListError);
 }
