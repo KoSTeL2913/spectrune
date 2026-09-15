@@ -360,11 +360,21 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 	// connection.
 	if b.outTun == nil || len(b.outTun.includedApps) == 0 {
 		log.Printf("full-tunnel/pass-through mode: blocking outbound IPv6 to prevent it bypassing the tunnel")
-		if err := blockIPv6Firewall(); err != nil {
-			log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
-		} else {
-			log.Printf("outbound IPv6 blocked successfully")
-		}
+		// Genuinely best-effort (per the doc above) — run it in the
+		// background rather than blocking Start()/the Connect RPC on it.
+		// runPowerShellWithRetry can now take several seconds on a slow
+		// or WMI-flaky machine (confirmed live 2026-09-15: retries here
+		// made a real disconnect feel frozen for several seconds — see
+		// unblockIPv6Firewall's call in Stop() for the matching fix),
+		// and nothing about the tunnel actually depends on this
+		// finishing before Connect replies.
+		go func() {
+			if err := blockIPv6Firewall(); err != nil {
+				log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
+			} else {
+				log.Printf("outbound IPv6 blocked successfully")
+			}
+		}()
 	}
 
 	if b.outTun != nil && len(b.outTun.includedApps) > 0 {
@@ -484,9 +494,20 @@ func (b *Bridge) Stop() {
 		deleteRouteAlias = adapterName
 	}
 	exec.Command("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", deleteRouteAlias).Run()
-	if err := unblockIPv6Firewall(); err != nil {
-		log.Printf("warning: could not remove outbound IPv6 block: %v", err)
-	}
+	// Best-effort cleanup, run in the background rather than blocking
+	// Stop()/the Disconnect RPC on it — same reasoning as blockIPv6Firewall's
+	// call in Start(). This one matters even more in practice: it runs on
+	// literally every disconnect (not just full-tunnel connects), and
+	// runPowerShellWithRetry's retries made a real disconnect feel frozen
+	// for several seconds on a slow/WMI-flaky machine — reported live
+	// 2026-09-15 ("нажал кнопку отключить и он зависает"). If the whole
+	// process exits before this finishes, the next launch's startup
+	// safety net (service_windows.go) removes any rule left behind.
+	go func() {
+		if err := unblockIPv6Firewall(); err != nil {
+			log.Printf("warning: could not remove outbound IPv6 block: %v", err)
+		}
+	}()
 
 	// Stop both pump goroutines and WAIT for them to actually return
 	// before touching the session/adapter — closing either while a pump
