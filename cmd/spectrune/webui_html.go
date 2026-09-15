@@ -1777,11 +1777,20 @@ function openSettings() {
   // getAutostartEnabled only exists on Windows (autostart_windows.go) —
   // the daemon already starts itself on Linux via systemd, this toggle
   // is purely about the GUI/tray front-end reappearing after login.
+  // Reveal the row only once the real value is known, rather than
+  // showing it unchecked first and flipping it a moment later — that
+  // async gap was visible as a brief flicker every time Settings opened
+  // (reported live 2026-09-15: "мигнул и всё" for a toggle that actually
+  // was enabled the whole time).
   if (window.getAutostartEnabled) {
-    $('settings-autostart-row').style.display = 'flex';
+    // Hidden first, every open — not just the first — otherwise the
+    // second+ open would flash whatever value was left over from last
+    // time before this refreshes it.
+    $('settings-autostart-row').style.display = 'none';
     getAutostartEnabled().then(function(enabled) {
       $('settings-autostart-toggle').checked = enabled;
-    }).catch(function() { /* best-effort — leave it unchecked */ });
+    }).catch(function() { /* best-effort — leave it unchecked */ })
+      .finally(function() { $('settings-autostart-row').style.display = 'flex'; });
   }
 }
 function closeSettings() {
