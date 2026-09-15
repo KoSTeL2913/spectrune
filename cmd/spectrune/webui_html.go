@@ -110,18 +110,33 @@ const webUIHTML = `<!DOCTYPE html>
   .profile-list li.selected { background: var(--selected-bg); border-left: 3px solid var(--accent); padding-left: 9px; font-weight: 600; }
   .profile-list li.empty { color: var(--muted); cursor: default; }
   .profile-list li.empty:hover { background: transparent; }
-  .profile-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .profile-row-info { min-width: 0; flex: 1; }
+  /* Two equal-width click zones per row: the left half (profile-row-info)
+     selects the profile (for Edit…/Apps…/Domains…/Delete below), the
+     right half (profile-row-connect) connects/disconnects it directly —
+     no separate bottom Connect button/status line at all. The connect
+     half only appears on row hover (like the small button it replaced),
+     it just now claims half the row's width instead of a corner pill. */
+  .profile-row { display: flex; align-items: stretch; gap: 0; }
+  .profile-row-info { min-width: 0; flex: 1 1 0; cursor: pointer; }
   .profile-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .profile-row-status { font-size: 11px; color: var(--muted); font-weight: 400; margin-top: 1px; min-height: 13px; }
   .profile-row-status.connected { color: #2ee6a0; }
   .profile-row-status.connecting { color: #e6b422; }
+  .profile-row-status.error { color: #e5484d; }
   .profile-row-routing { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
   .profile-row-connect {
-    flex-shrink: 0; padding: 4px 12px; font-size: 12px; opacity: 0;
-    pointer-events: none; transition: opacity .12s ease;
+    flex: 1 1 0; min-width: 0; margin-left: 10px; padding: 6px 10px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 8px; cursor: pointer; font-size: 12.5px; font-weight: 600;
+    color: var(--muted); opacity: 0; pointer-events: none;
+    transition: opacity .12s ease, background .12s ease, color .12s ease;
   }
   .profile-row:hover .profile-row-connect { opacity: 1; pointer-events: auto; }
+  .profile-row-connect:hover { background: var(--chip-hover); color: var(--ink); }
+  .profile-row-connect.active { color: #e5484d; }
+  .profile-row-connect.active:hover { background: rgba(229,72,77,.14); }
+  .profile-row-connect:not(.active):hover { color: var(--accent); }
+  .profile-row-connect.busy { opacity: .5 !important; pointer-events: none !important; }
   .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; flex-shrink: 0; }
   button {
     padding: 7px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--chip-bg);
@@ -132,16 +147,6 @@ const webUIHTML = `<!DOCTYPE html>
   button:disabled:hover { background: var(--chip-bg); }
   button.primary { background: var(--grad); color: white; border-color: transparent; font-weight: 600; }
   button.primary:hover { filter: brightness(1.12); }
-  .status-row { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); flex-shrink: 0; }
-  .status-text { font-weight: 600; display: flex; align-items: center; gap: 7px; }
-  .status-text::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #8a879c; flex-shrink: 0; }
-  .status-text.connected { color: #1fae7a; }
-  .status-text.connected::before { background: #2ee6a0; box-shadow: 0 0 0 3px rgba(46,230,160,.22); }
-  .status-text.connecting { color: #b8860b; }
-  .status-text.connecting::before { background: #e6b422; box-shadow: 0 0 0 3px rgba(230,180,34,.22); }
-  .status-text.disconnected { color: var(--muted); }
-  .status-text.disconnected.error { color: #e5484d; }
-  .status-text.disconnected.error::before { background: #e5484d; box-shadow: 0 0 0 3px rgba(229,72,77,.22); }
   label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
   input[type=text], textarea {
     width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
@@ -375,10 +380,6 @@ const webUIHTML = `<!DOCTYPE html>
     <button id="btn-domains" disabled data-i18n="domains">Domains…</button>
     <button id="btn-delete" disabled data-i18n="delete">Delete</button>
   </div>
-  <div class="status-row">
-    <span id="status-text" class="status-text disconnected" data-i18n="checkingStatus">Checking status…</span>
-    <button id="btn-connect" class="primary" disabled data-i18n="connect">Connect</button>
-  </div>
   <div id="included-apps-row" class="included-apps" style="display:none"></div>
 </div>
 
@@ -507,9 +508,7 @@ const webUIHTML = `<!DOCTYPE html>
 var I18N = {
   en: {
     add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
-    checkingStatus: 'Checking status…', connected: 'Connected: %s', disconnected: 'Disconnected',
-    connecting: 'Connecting to %s…',
-    connectedShort: 'Connected', connectingShort: 'Connecting…',
+    connectedShort: 'Connected', connectingShort: 'Connecting…', errorShort: 'Error',
     routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d',
     connect: 'Connect', disconnect: 'Disconnect',
     noProfiles: 'No profiles yet — click Add… to create one.',
@@ -552,13 +551,10 @@ var I18N = {
     domainsNewList: '+ New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
     domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
     domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "+ New list…" to create one.',
-    connectionError: 'Connection error. Unavailable.',
   },
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
-    checkingStatus: 'Проверка статуса…', connected: 'Подключено: %s', disconnected: 'Отключено',
-    connecting: 'Подключение к %s…',
-    connectedShort: 'Подключено', connectingShort: 'Подключение…',
+    connectedShort: 'Подключено', connectingShort: 'Подключение…', errorShort: 'Ошибка',
     routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d',
     connect: 'Подключить', disconnect: 'Отключить',
     noProfiles: 'Пока нет профилей — нажмите «Добавить…», чтобы создать.',
@@ -601,7 +597,6 @@ var I18N = {
     domainsNewList: '+ Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
     domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
     domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «+ Новый список…», чтобы создать.',
-    connectionError: 'Ошибка подключения. Недоступен.',
   },
 };
 
@@ -631,9 +626,10 @@ var state = {
   profiles: [],
   selected: null,
   connectBusy: false, // a connect()/disconnect() call is in flight — keep
-                       // btn-connect disabled regardless of what the 3s
-                       // status poll thinks, so a slow Connect can't be
-                       // double-clicked into "already connected"
+                       // every row's connect zone disabled regardless of
+                       // what the 3s status poll thinks, so a slow
+                       // Connect can't be double-clicked into "already
+                       // connected"
   connected: false,
   connectedProfile: '',
   handshakeOK: false,
@@ -645,6 +641,7 @@ var state = {
   // 2026-09-14.
   connectStartedAt: null,
   connectError: false,
+  lastConnectErrorProfile: null, // which row gets the error label — see refreshStatus
   editingExisting: false,
   installedApps: [],
   includedApps: [],   // lowercase path -> path, preserved case
@@ -703,12 +700,18 @@ function renderProfileList() {
     var isActive = state.connected && state.connectedProfile === name;
     if (isActive) {
       // Short, unparametrized labels — not the tf('connected'/'connecting',
-      // name) versions the main status bar uses, since this row already
-      // shows the name in nameEl right above; reusing those templates
-      // here literally printed "%s" (nothing filled it in — found live
-      // 2026-09-04).
+      // name) versions the old bottom status bar used, since this row
+      // already shows the name in nameEl right above; reusing those
+      // templates here literally printed "%s" (nothing filled it in —
+      // found live 2026-09-04).
       statusEl.textContent = state.handshakeOK ? t('connectedShort') : t('connectingShort');
       statusEl.className = 'profile-row-status ' + (state.handshakeOK ? 'connected' : 'connecting');
+    } else if (name === state.lastConnectErrorProfile) {
+      // See refreshStatus's connect-timeout branch — this used to only
+      // ever show in the (now-removed) bottom status bar, with no way to
+      // tell which profile it was even about.
+      statusEl.textContent = t('errorShort');
+      statusEl.className = 'profile-row-status error';
     }
     var routingEl = document.createElement('div');
     routingEl.className = 'profile-row-routing';
@@ -716,29 +719,41 @@ function renderProfileList() {
     info.appendChild(nameEl);
     info.appendChild(statusEl);
     info.appendChild(routingEl);
+    info.onclick = function() { state.selected = name; renderProfileList(); updateButtons(); };
 
-    var connectBtn = document.createElement('button');
-    connectBtn.className = 'profile-row-connect primary';
-    connectBtn.textContent = isActive ? t('disconnect') : t('connect');
-    connectBtn.onclick = function(e) {
+    // profile-row-connect is the row's right half — see its CSS doc for
+    // why this replaced a small hover-only button. A plain div, not a
+    // button, since it's sized and clicked as half the row rather than a
+    // button-shaped control.
+    var connectZone = document.createElement('div');
+    connectZone.className = 'profile-row-connect' + (isActive ? ' active' : '') + (state.connectBusy ? ' busy' : '');
+    connectZone.textContent = isActive ? t('disconnect') : t('connect');
+    connectZone.onclick = function(e) {
       e.stopPropagation();
       toggleConnectRow(name);
     };
 
     li.appendChild(info);
-    li.appendChild(connectBtn);
-    li.onclick = function() { state.selected = name; renderProfileList(); updateButtons(); };
+    li.appendChild(connectZone);
     ul.appendChild(li);
   });
   updateButtons();
   refreshIncludedAppsPreview();
 }
 
-// toggleConnectRow is the per-row hover Connect/Disconnect button —
-// Disconnect if this row is the active profile, otherwise Connect to it
-// (disconnecting whatever else is active first, since Bridge.Connect
-// refuses to run alongside an existing connection — see service.go).
+// toggleConnectRow is the row's right-half connect/disconnect zone (see
+// its CSS doc — this is now the only way to connect, there's no separate
+// bottom Connect button any more) — disconnect if this row is the active
+// profile, otherwise connect to it (disconnecting whatever else is
+// active first, since Bridge.Connect refuses to run alongside an
+// existing connection — see service.go). connectBusy guards against a
+// double-click race the same way the old bottom button's handler did
+// (fixed live 2026-09-04) — this is the only trigger left, so it has to
+// carry that guard itself now.
 function toggleConnectRow(name) {
+  if (state.connectBusy) return;
+  state.connectBusy = true;
+  renderProfileList();
   var p;
   if (state.connected && state.connectedProfile === name) {
     p = disconnect();
@@ -746,10 +761,12 @@ function toggleConnectRow(name) {
     p = disconnect().then(function() { return connect(name); });
   } else {
     state.connectError = false;
+    state.lastConnectErrorProfile = null;
     state.connectStartedAt = null;
     p = connect(name);
   }
-  p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); });
+  p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
+    .finally(function() { state.connectBusy = false; renderProfileList(); });
 }
 
 function updateButtons() {
@@ -758,32 +775,6 @@ function updateButtons() {
   $('btn-apps').disabled = !has;
   $('btn-domains').disabled = !has;
   $('btn-delete').disabled = !has;
-  $('btn-connect').disabled = state.connectBusy || (!has && !state.connected);
-  if (state.connected && state.handshakeOK) {
-    $('status-text').textContent = tf('connected', state.connectedProfile);
-    $('status-text').className = 'status-text connected';
-    $('btn-connect').textContent = t('disconnect');
-    if (!state.connectBusy) $('btn-connect').disabled = false;
-  } else if (state.connected) {
-    // Adapter/local bridge is up but the WireGuard handshake with the
-    // peer hasn't completed (or never will, for a bad config/dead
-    // server) — see StateReply.HandshakeOK's doc in service.go. Used to
-    // just say "Connected" here regardless, which was actively
-    // misleading: confirmed live 2026-09-04 with a profile whose tunnel
-    // never actually passed traffic.
-    $('status-text').textContent = tf('connecting', state.connectedProfile);
-    $('status-text').className = 'status-text connecting';
-    $('btn-connect').textContent = t('disconnect');
-    if (!state.connectBusy) $('btn-connect').disabled = false;
-  } else if (state.connectError) {
-    $('status-text').textContent = t('connectionError');
-    $('status-text').className = 'status-text disconnected error';
-    $('btn-connect').textContent = t('connect');
-  } else {
-    $('status-text').textContent = t('disconnected');
-    $('status-text').className = 'status-text disconnected';
-    $('btn-connect').textContent = t('connect');
-  }
   // Same colored-when-connected / grey-when-disconnected swap as the tray
   // icon (tray.go) and the Linux awg-gui counterpart's AppIndicator —
   // colored only once the handshake actually confirms the tunnel works.
@@ -937,8 +928,8 @@ function renderIncludedAppsPreview(apps) {
 }
 
 function refreshStatus() {
-  // Must return this promise, not just kick it off — btn-connect's click
-  // handler chains .finally(...) after .then(refreshStatus) specifically
+  // Must return this promise, not just kick it off — toggleConnectRow's
+  // click handler chains .finally(...) after .then(refreshStatus) specifically
   // so state.connectBusy doesn't clear until state.connected has
   // actually been refreshed from the server. Without the return, the
   // outer promise resolved with getState() still in flight, clearing
@@ -980,6 +971,12 @@ function refreshStatus() {
 
     state.connectStartedAt = null;
     state.connectError = true;
+    // Captured before the disconnect+getState below overwrites
+    // connectedProfile — this is now the only record of which row to
+    // flag, since there's no bottom status bar to show a generic
+    // (unattributed) error in any more. See renderProfileList's use of
+    // this for the per-row "Ошибка"/"Error" label.
+    state.lastConnectErrorProfile = state.connectedProfile;
     state.connectBusy = true;
     disconnect().then(function() {
       return getState();
@@ -1071,15 +1068,6 @@ $('btn-apps').onclick = function() {
 $('btn-domains').onclick = function() {
   if (!state.selected) return;
   openEdit(state.selected, 'domains');
-};
-$('btn-connect').onclick = function() {
-  if (state.connectBusy) return; // already in flight — ignore a second click
-  state.connectBusy = true;
-  if (!state.connected) { state.connectError = false; state.connectStartedAt = null; }
-  $('btn-connect').disabled = true;
-  var p = state.connected ? disconnect() : connect(state.selected);
-  p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
-    .finally(function() { state.connectBusy = false; updateButtons(); });
 };
 
 // ---------- edit view ----------
