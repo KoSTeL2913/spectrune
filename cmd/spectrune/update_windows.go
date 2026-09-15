@@ -230,7 +230,7 @@ func fetchLatestRelease() (*ghRelease, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "Spectrune-updater")
 
-	resp, err := client.Do(req)
+	resp, err := doWithHostsFallback(client, req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", latestReleaseURL, err)
 	}
@@ -289,7 +289,11 @@ func downloadUpdate(url string) (string, error) {
 	path := filepath.Join(dir, "update.msi")
 
 	client := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := client.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := doWithHostsFallback(client, req)
 	if err != nil {
 		return "", fmt.Errorf("GET %s: %w", url, err)
 	}
