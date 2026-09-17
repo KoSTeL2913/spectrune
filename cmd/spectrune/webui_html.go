@@ -1304,12 +1304,16 @@ $('btn-import').onclick = function() {
   importConfig().then(function(result) {
     if (!result || !result.Text) return;
     $('edit-config').value = result.Text;
-    // Only offer to name the tunnel for a brand-new profile — silently
-    // renaming an existing one just because its config text got replaced
-    // would be surprising, so Edit keeps the old behavior (text only).
+    // Only offer to name+save for a brand-new profile — silently renaming
+    // an existing one just because its config text got replaced would be
+    // surprising, so Edit keeps the old behavior (text only, manual Save).
     if (!state.editingExisting) {
       showPrompt(t('importNamePrompt'), result.SuggestedName || '', function(name) {
         $('edit-name').value = name;
+        saveCurrentProfile().then(function() {
+          show('view-list');
+          refreshProfiles();
+        }).catch(showEditError);
       }, t('importNameHint'));
     }
   }).catch(showEditError);
