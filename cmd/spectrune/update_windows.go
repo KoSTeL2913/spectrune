@@ -196,9 +196,9 @@ func currentSpectruneProductCode() string {
 	return ""
 }
 
-// installRelease downloads release's .msi asset and installs it
-// silently. Best-effort: every failure just logs and returns, matching
-// the fully-silent auto-check path this is shared with.
+// installRelease downloads release's .msi asset and schedules it to be
+// installed silently. Best-effort: every failure just logs and returns,
+// matching the fully-silent auto-check path this is shared with.
 func installRelease(release *ghRelease) {
 	var msiURL string
 	for _, a := range release.Assets {
@@ -214,29 +214,82 @@ func installRelease(release *ghRelease) {
 
 	log.Printf("update check: %s available (running %s), downloading", release.TagName, appVersion)
 	updateInProgress.Store(true)
-	defer updateInProgress.Store(false)
 	path, err := downloadUpdate(msiURL)
 	if err != nil {
 		log.Printf("update check: download failed: %v", err)
+		updateInProgress.Store(false)
 		return
 	}
 
-	if oldCode := currentSpectruneProductCode(); oldCode != "" {
-		log.Printf("update check: uninstalling previous release (%s) before installing %s", oldCode, release.TagName)
-		out, err := exec.Command("msiexec.exe", "/x", oldCode, "/qn", "/norestart").CombinedOutput()
-		if err != nil {
-			log.Printf("update check: uninstalling previous release failed: %v (%s)", err, string(out))
-			return
-		}
+	if err := scheduleInstall(release.TagName, path); err != nil {
+		log.Printf("update check: scheduling install failed: %v", err)
+		updateInProgress.Store(false)
+		return
 	}
+	// Deliberately no updateInProgress.Store(false) on the success path
+	// — the scheduled task below stops SpectruneService partway through
+	// (see scheduleInstall's own doc), which is this very process, so
+	// nothing after that point ever runs anyway. A fresh process/service
+	// instance starts back at updateInProgress's zero value (false)
+	// regardless, once the new release is up.
+}
 
-	log.Printf("update check: installing %s silently", path)
-	out, err := exec.Command("msiexec.exe", "/i", path, "/qn", "/norestart").CombinedOutput()
+// scheduleInstall writes a small script that uninstalls whatever
+// Spectrune release is currently registered (via currentSpectruneProductCode
+// — see its own doc for why that's needed at all) and then installs
+// msiPath, and runs that script via a detached, one-shot SYSTEM Scheduled
+// Task rather than running both msiexec calls inline here.
+//
+// Can't just be two sequential exec.Command calls in this same goroutine:
+// the `/x` step stops SpectruneService, which IS the process running this
+// code — same class of problem webui_windows.go's closeForUpdate already
+// solved for the GUI side with its own Scheduled Task relaunch. Confirmed
+// live 2026-09-17 on a clean VM: an inline `/x` call completed
+// successfully (verified via the log and the registry) but the
+// process — and the goroutine that was supposed to run the follow-up
+// `/i` — died right along with the service it had just uninstalled, so
+// the machine was left with no Spectrune install at all until manually
+// reinstalled. A Scheduled Task's own process is independent of the
+// caller's lifetime, so it survives; SYSTEM as the run-as account avoids
+// any Session-0/interactive-logon requirement (unlike closeForUpdate's
+// GUI-side task, which does need a real logged-on session and so runs as
+// that user instead).
+func scheduleInstall(tag, msiPath string) error {
+	stateDir, err := updateStateDir()
 	if err != nil {
-		log.Printf("update check: msiexec failed: %v (%s)", err, string(out))
-		return
+		return err
 	}
-	log.Printf("update check: %s installed successfully", release.TagName)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+
+	const taskName = "SpectruneSelfUpdateInstall"
+	var b strings.Builder
+	if oldCode := currentSpectruneProductCode(); oldCode != "" {
+		fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/x','%s','/qn','/norestart' -Wait\r\n", oldCode)
+	}
+	fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/i','%s','/qn','/norestart' -Wait\r\n", msiPath)
+	fmt.Fprintf(&b, "schtasks.exe /delete /tn '%s' /f\r\n", taskName)
+	scriptPath := filepath.Join(stateDir, "self-update-install.ps1")
+	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+
+	triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
+	createArgs := []string{
+		"/create", "/tn", taskName,
+		"/tr", fmt.Sprintf(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"`, scriptPath),
+		"/sc", "once", "/st", triggerTime,
+		"/ru", "SYSTEM", "/f",
+	}
+	if out, err := exec.Command("schtasks.exe", createArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("schtasks /create: %w (%s)", err, out)
+	}
+	if out, err := exec.Command("schtasks.exe", "/run", "/tn", taskName).CombinedOutput(); err != nil {
+		return fmt.Errorf("schtasks /run: %w (%s)", err, out)
+	}
+	log.Printf("update check: %s install task scheduled and started", tag)
+	return nil
 }
 
 // updateStateDir mirrors runService's own placement of service.log — one
