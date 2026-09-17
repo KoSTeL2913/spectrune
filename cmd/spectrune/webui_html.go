@@ -191,6 +191,7 @@ const webUIHTML = `<!DOCTYPE html>
   select:focus { outline: none; border-color: var(--accent); }
   textarea.flex-grow { height: auto; resize: none; }
   .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; flex-shrink: 0; overflow-wrap: anywhere; }
+  #update-status-text { flex-shrink: 1; min-width: 0; }
   .error { color: var(--err-fg); background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 7px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; font-size: 12.5px; flex-shrink: 0; }
   .app-list { list-style: none; margin: 8px 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow-y: auto; }
   .app-list li { padding: 7px 10px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; gap: 9px; transition: background .12s ease; }
