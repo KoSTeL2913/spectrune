@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // latestReleaseURL points at this project's own public GitHub repo — see
@@ -134,6 +136,66 @@ func (s *Service) CheckForUpdateNow(_ struct{}, reply *UpdateCheckReply) error {
 	return nil
 }
 
+// currentSpectruneProductCode looks up the MSI ProductCode (registry key
+// name, e.g. "{CC97B33D-...}") of whatever Spectrune release is currently
+// registered in Add/Remove Programs, or "" if none is found.
+//
+// Needed because spectrune.wxs regenerates ProductCode every release
+// (required so Windows Installer treats each release as a distinct
+// product for its shared-component bookkeeping — see that file's own
+// top comment) and installs the new MSI's shared components
+// (SpectruneExeComponent et al.) alongside the still-registered old
+// product in a single RemoveExistingProducts-driven transaction.
+// Confirmed live 2026-09-17: wixl's (this project's WiX-compatible
+// Linux-hosted MSI compiler) handling of that transaction resolves
+// SpectruneExeComponent's install Action to Null despite Installed:
+// Absent / Request: Local for the new product — InstallFiles then
+// silently skips copying spectrune.exe, and the InstallService custom
+// action (which runs the just-installed exe with /installservice) fails
+// with error 2753 ("file not marked for installation") since the file
+// was never actually staged, leaving the machine with the OLD exe and
+// NO registered service at all. Reproduced deterministically on a clean
+// VM, not a one-off. Rather than fight wixl's internals for this
+// multi-product-in-one-transaction path, currentSpectruneProductCode +
+// the explicit `msiexec /x` below sidestep it entirely: uninstall the
+// old product as a fully separate, already-proven-reliable transaction
+// (the exact manual "clean uninstall then fresh install" process this
+// project's own release notes already document as the reliable
+// fallback whenever an in-place upgrade misbehaves) before installing
+// the new one.
+func currentSpectruneProductCode() string {
+	roots := []struct {
+		root registry.Key
+		path string
+	}{
+		{registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`},
+		{registry.LOCAL_MACHINE, `SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`},
+	}
+	for _, r := range roots {
+		k, err := registry.OpenKey(r.root, r.path, registry.READ)
+		if err != nil {
+			continue
+		}
+		names, err := k.ReadSubKeyNames(-1)
+		k.Close()
+		if err != nil {
+			continue
+		}
+		for _, subName := range names {
+			sk, err := registry.OpenKey(r.root, r.path+`\`+subName, registry.READ)
+			if err != nil {
+				continue
+			}
+			displayName, _, _ := sk.GetStringValue("DisplayName")
+			sk.Close()
+			if strings.HasPrefix(displayName, "Spectrune") {
+				return subName
+			}
+		}
+	}
+	return ""
+}
+
 // installRelease downloads release's .msi asset and installs it
 // silently. Best-effort: every failure just logs and returns, matching
 // the fully-silent auto-check path this is shared with.
@@ -157,6 +219,15 @@ func installRelease(release *ghRelease) {
 	if err != nil {
 		log.Printf("update check: download failed: %v", err)
 		return
+	}
+
+	if oldCode := currentSpectruneProductCode(); oldCode != "" {
+		log.Printf("update check: uninstalling previous release (%s) before installing %s", oldCode, release.TagName)
+		out, err := exec.Command("msiexec.exe", "/x", oldCode, "/qn", "/norestart").CombinedOutput()
+		if err != nil {
+			log.Printf("update check: uninstalling previous release failed: %v (%s)", err, string(out))
+			return
+		}
 	}
 
 	log.Printf("update check: installing %s silently", path)

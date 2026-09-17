@@ -53,8 +53,8 @@
   reinstalled correctly.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <?define ProductCode = "6037870B-3D6D-41A4-9792-FA17D414EA09" ?>
-  <?define ProductVersion = "2.0.19.0" ?>
+  <?define ProductCode = "8EBC60D1-56A9-41E5-B046-85D0EC4A5B5B" ?>
+  <?define ProductVersion = "2.0.20.0" ?>
   <!--
     Name includes the version deliberately — [ProductName] is what every
     bundled wizard dialog's title bar and "Welcome to the ... Setup
@@ -104,6 +104,30 @@
       recognizes the old and new product as sharing the same components
       by that Guid and re-points ownership rather than deleting the files
       the new product just installed.
+
+      CAVEAT found live 2026-09-17, still unresolved in this file: an
+      in-place major upgrade through THIS shared-component/late-
+      RemoveExistingProducts path is not reliable in wixl — reproduced
+      deterministically going from 2.0.15.0 to 2.0.19.0 (both a plain
+      version bump, no structural change here) on a clean VM:
+      SpectruneExeComponent's computed install Action came back Null
+      despite Installed: Absent / Request: Local for the new product,
+      so InstallFiles silently never copied the new spectrune.exe, and
+      the InstallService custom action then failed with error 2753
+      ("file not marked for installation") since the file was never
+      actually staged — leaving the machine with the OLD exe and NO
+      registered service at all. A plain `msiexec /x <old ProductCode>`
+      followed by a separate `msiexec /i` of the new msi (i.e. skip
+      RemoveExistingProducts/this Upgrade element entirely by not
+      letting both products' registrations coexist in one transaction)
+      installs cleanly every time — confirmed live right after the
+      failure above, same msi, same VM. The self-updater
+      (update_windows.go's installRelease) now does exactly that
+      two-step dance itself rather than relying on this in-place path.
+      A *manual* `msiexec /i` upgrade over an existing install is still
+      exposed to this bug; uninstall the old ProductCode first by hand
+      if you hit error 2753 here again. Root-causing wixl's own
+      component-costing logic for this case is unstarted follow-up.
     -->
     <Upgrade Id="19478094-F9F8-42A8-8950-08CE0458D57B">
       <UpgradeVersion Minimum="0.0.0.0" IncludeMinimum="yes"
