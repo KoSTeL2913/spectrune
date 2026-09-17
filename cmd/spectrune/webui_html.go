@@ -1,5 +1,14 @@
 package main
 
+// ImportedConfig is importConfig's return value (webui_linux.go,
+// webui_windows.go) — the picked file's raw text plus a filename-derived
+// name suggestion, so the "name this tunnel" prompt (btn-import's handler
+// below) has something sensible to prefill instead of an empty field.
+type ImportedConfig struct {
+	SuggestedName string
+	Text          string
+}
+
 // webUIHTML is the entire GUI: one self-contained page (no external
 // resources — everything inline, since it's loaded via SetHtml rather
 // than served from a real origin), with plain JS switching between three
@@ -194,11 +203,15 @@ const webUIHTML = `<!DOCTYPE html>
   .checkbox { width: 16px; text-align: center; font-size: 15px; color: var(--muted); }
   .checkbox.checked { color: var(--accent); }
   .app-list li > .app-name-wrap { flex-grow: 1; min-width: 0; }
-  .app-launch-btn { flex-shrink: 0; font-size: 11.5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--chip-bg); color: var(--fg); cursor: pointer; }
+  .app-launch-btn { flex-shrink: 0; font-size: 11.5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); cursor: pointer; }
   .app-launch-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
   .app-launch-btn:disabled { opacity: .5; cursor: default; }
-  .backlink { cursor: pointer; color: var(--accent); margin-bottom: 8px; display: inline-block; font-weight: 600; font-size: 13px; }
-  .backlink:hover { text-decoration: underline; }
+  /* Top-of-view "← Back"/"← Done" nav — a real <button>, styled like every
+     other button (border/background/hover), not the link-style text it
+     used to be. */
+  .backlink { margin-bottom: 8px; align-self: flex-start; }
+  .icon-close { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 15px; }
+  .icon-close:hover { text-decoration: underline; }
   .lang-switch { display: flex; gap: 4px; }
   .lang-switch button { padding: 3px 9px; font-size: 11px; border-radius: 5px; }
   .lang-switch button.active { background: var(--grad); color: #fff; border-color: transparent; }
@@ -339,7 +352,7 @@ const webUIHTML = `<!DOCTYPE html>
   <div class="settings-box">
     <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
       <h2 style="margin:0;font-size:15px" data-i18n="settingsTitle">Settings</h2>
-      <span class="backlink" id="settings-close" style="margin:0">✕</span>
+      <span class="icon-close" id="settings-close" style="margin:0">✕</span>
     </div>
     <div class="theme-panel-row">
       <span class="theme-panel-label" data-i18n="settingsLanguage">Language</span>
@@ -408,7 +421,7 @@ const webUIHTML = `<!DOCTYPE html>
 </div>
 
 <div id="view-edit" class="view">
-  <span class="backlink" id="edit-back" data-i18n="back">&larr; Back</span>
+  <button class="backlink" id="edit-back" data-i18n="back">&larr; Back</button>
   <h1 id="edit-title">Add profile</h1>
   <div id="edit-error" class="error" style="display:none"></div>
   <label for="edit-name" data-i18n="name">Name</label>
@@ -427,14 +440,14 @@ const webUIHTML = `<!DOCTYPE html>
       <button id="btn-hotkey-clear" type="button" data-i18n="hotkeyClear">Clear</button>
     </div>
   </div>
-  <div class="row" style="margin-top:6px;justify-content:space-between;align-items:baseline">
-    <label for="edit-config" style="margin:0" data-i18n="configLabel">Configuration (wg-quick format — same as AmneziaWG's own export)</label>
-    <button id="btn-import" data-i18n="importFile">Import from file…</button>
-  </div>
+  <label for="edit-config" style="margin-top:14px" data-i18n="configLabel">Configuration</label>
   <textarea id="edit-config" class="flex-grow" spellcheck="false"></textarea>
   <div class="row" style="margin-top:10px">
     <button id="btn-open-apps">Apps: 0 selected…</button>
     <button id="btn-open-domains">Domains: 0 enabled…</button>
+  </div>
+  <div class="row">
+    <button id="btn-import" data-i18n="importFile">Import from file…</button>
   </div>
   <div class="row">
     <button id="btn-save" class="primary" data-i18n="save">Save</button>
@@ -443,7 +456,7 @@ const webUIHTML = `<!DOCTYPE html>
 </div>
 
 <div id="view-apps" class="view">
-  <span class="backlink" id="apps-back" data-i18n="done">&larr; Done</span>
+  <button class="backlink" id="apps-back" data-i18n="done">&larr; Done</button>
   <h1 data-i18n="applications">Applications</h1>
   <p class="hint" data-i18n="appsHint">Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Add…" to browse for one not listed here.</p>
   <input type="text" id="apps-search" data-i18n-placeholder="searchPlaceholder" placeholder="Search installed applications…">
@@ -464,7 +477,7 @@ const webUIHTML = `<!DOCTYPE html>
 </div>
 
 <div id="view-domains" class="view">
-  <span class="backlink" id="domains-back" data-i18n="done">&larr; Done</span>
+  <button class="backlink" id="domains-back" data-i18n="done">&larr; Done</button>
   <h1 data-i18n="domainLists">Domain lists</h1>
   <p class="hint" data-i18n="domainsHint">Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list's domains with "Edit".</p>
   <ul id="domains-list" class="app-list flex-grow"></ul>
@@ -474,7 +487,7 @@ const webUIHTML = `<!DOCTYPE html>
 </div>
 
 <div id="view-domain-edit" class="view">
-  <span class="backlink" id="domain-edit-back" data-i18n="back">&larr; Back</span>
+  <button class="backlink" id="domain-edit-back" data-i18n="back">&larr; Back</button>
   <h1 id="domain-edit-title"></h1>
   <p class="hint" data-i18n="domainEditHint">One domain per line (e.g. discord.com) — subdomains are matched automatically.</p>
   <textarea id="domain-edit-text" class="flex-grow" spellcheck="false"></textarea>
@@ -540,8 +553,9 @@ var I18N = {
     noProfiles: 'No profiles yet — click Add… to create one.',
     confirmDelete: 'Delete profile "%s"?',
     back: '← Back', addProfile: 'Add profile', editProfile: 'Edit profile',
-    name: 'Name', configLabel: "Configuration (wg-quick format — same as AmneziaWG's own export)",
+    name: 'Name', configLabel: "Configuration",
     importFile: 'Import from file…', appsSelected: 'Apps: %d selected…',
+    importNamePrompt: 'Name for this tunnel:', importNameHint: 'Visible only to you',
     save: 'Save', cancel: 'Cancel', nameRequired: 'A name is required.',
     done: '← Done', applications: 'Applications',
     appsHint: 'Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Add…" to browse for one not listed here.',
@@ -588,8 +602,9 @@ var I18N = {
     noProfiles: 'Пока нет профилей — нажмите «Добавить…», чтобы создать.',
     confirmDelete: 'Удалить профиль «%s»?',
     back: '← Назад', addProfile: 'Новый профиль', editProfile: 'Изменение профиля',
-    name: 'Название', configLabel: 'Конфигурация (формат wg-quick — как экспорт из AmneziaWG)',
+    name: 'Название', configLabel: 'Конфигурация',
     importFile: 'Импорт из файла…', appsSelected: 'Приложения: выбрано %d…',
+    importNamePrompt: 'Название туннеля:', importNameHint: 'Отображается только для вас',
     save: 'Сохранить', cancel: 'Отмена', nameRequired: 'Укажите название.',
     done: '← Готово', applications: 'Приложения',
     appsHint: 'Выберите приложения, трафик которых должен идти через этот туннель. Нажмите на строку, чтобы переключить, или используйте «Добавить…», чтобы указать путь вручную.',
@@ -1123,9 +1138,19 @@ function showConfirm(message, onOk) {
 
 // showPrompt replaces the native prompt() popup with an in-theme modal —
 // runs onOk(value) if the user confirms with a non-empty value, does
-// nothing on Cancel/overlay click.
-function showPrompt(message, defaultValue, onOk) {
-  $('prompt-message').textContent = message;
+// nothing on Cancel/overlay click. An optional hint renders as a smaller
+// muted line below the message (its own line rather than appended in
+// parentheses — a long RU hint appended inline used to wrap mid-sentence).
+function showPrompt(message, defaultValue, onOk, hint) {
+  var msgEl = $('prompt-message');
+  msgEl.innerHTML = '';
+  msgEl.appendChild(document.createTextNode(message));
+  if (hint) {
+    var hintEl = document.createElement('div');
+    hintEl.style.cssText = 'font-weight:400;font-size:11.5px;color:var(--muted);margin-top:3px';
+    hintEl.textContent = hint;
+    msgEl.appendChild(hintEl);
+  }
   $('prompt-input').value = defaultValue || '';
   $('prompt-overlay').style.display = 'flex';
   $('prompt-input').focus();
@@ -1276,8 +1301,17 @@ $('btn-cancel').onclick = function() { stopHotkeyCapture(); show('view-list'); }
 $('btn-open-apps').onclick = function() { stopHotkeyCapture(); openAppsPicker(); };
 $('btn-open-domains').onclick = function() { stopHotkeyCapture(); openDomainsPicker(); };
 $('btn-import').onclick = function() {
-  importConfig().then(function(text) {
-    if (text) $('edit-config').value = text;
+  importConfig().then(function(result) {
+    if (!result || !result.Text) return;
+    $('edit-config').value = result.Text;
+    // Only offer to name the tunnel for a brand-new profile — silently
+    // renaming an existing one just because its config text got replaced
+    // would be surprising, so Edit keeps the old behavior (text only).
+    if (!state.editingExisting) {
+      showPrompt(t('importNamePrompt'), result.SuggestedName || '', function(name) {
+        $('edit-name').value = name;
+      }, t('importNameHint'));
+    }
   }).catch(showEditError);
 };
 

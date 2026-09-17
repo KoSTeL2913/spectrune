@@ -518,16 +518,18 @@ func bindAPI(w webview.WebView) {
 		return client.Call("Bridge.DeleteDomainList", name, &struct{}{})
 	}))
 
-	must(w.Bind("importConfig", func() (string, error) {
+	must(w.Bind("importConfig", func() (*ImportedConfig, error) {
 		path, err := zenityFilePicker("Import configuration")
 		if err != nil || path == "" {
-			return "", err
+			return nil, err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return string(data), nil
+		base := filepath.Base(path)
+		suggested := strings.TrimSuffix(base, filepath.Ext(base))
+		return &ImportedConfig{SuggestedName: suggested, Text: string(data)}, nil
 	}))
 }
 

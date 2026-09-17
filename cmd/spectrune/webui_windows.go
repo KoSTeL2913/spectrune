@@ -738,16 +738,18 @@ func bindAPI(w webview2.WebView) {
 	// edit view can drop it straight into the textarea — no separate
 	// "import" plumbing on the service side, this is purely a file-read
 	// convenience for the same Save flow that already parses pasted text.
-	must(w.Bind("importConfig", func() (string, error) {
+	must(w.Bind("importConfig", func() (*ImportedConfig, error) {
 		path, err := browseForFile("Import configuration", "Configuration files (*.conf)", "*.conf")
 		if err != nil || path == "" {
-			return "", err
+			return nil, err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return string(data), nil
+		base := filepath.Base(path)
+		suggested := strings.TrimSuffix(base, filepath.Ext(base))
+		return &ImportedConfig{SuggestedName: suggested, Text: string(data)}, nil
 	}))
 
 	// getAutostartEnabled/setAutostartEnabled back the "Launch on Windows
