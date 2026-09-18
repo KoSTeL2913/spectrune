@@ -827,6 +827,7 @@ function updateProfileRowStates() {
     connectZone.querySelector('.profile-row-connect-btn').textContent = isActive ? t('disconnect') : t('connect');
   });
   updateButtons();
+  refreshIncludedAppsPreview();
 }
 
 // toggleConnectRow is the row's right-half connect/disconnect zone (see
@@ -982,6 +983,7 @@ function loadRoutingSummaryInto(name, el) {
 // ---------- included-apps preview (under Connect/Disconnect) ----------
 
 var includedPreviewCache = {}; // profile name -> IncludedApps array, cleared whenever that profile is saved
+var includedAppsPreviewRenderedFor = undefined; // last name (or null) this actually rendered for
 
 function refreshIncludedAppsPreview() {
   var row = $('included-apps-row');
@@ -991,22 +993,50 @@ function refreshIncludedAppsPreview() {
   // that way instead of showing what's actually being routed (found live
   // 2026-09-04).
   var name = state.connected ? state.connectedProfile : state.selected;
+  // Skip re-rendering when nothing relevant changed — called from
+  // updateProfileRowStates's 3s poll now (see that function's own call
+  // site comment for why), and rebuilding this row's <img> elements
+  // unconditionally every tick would flicker/reload icons exactly like
+  // the profile-list hover bug this same poll loop already had to work
+  // around once (v2.0.13.0). Still worth calling every tick despite the
+  // guard, not just from renderProfileList's one-shot: connecting via
+  // toggleConnectRow can have state.connectedProfile lag behind
+  // state.connected by a poll or two, and loadProfile() below can fail
+  // transiently over IPC — with renderProfileList being the only
+  // trigger (true before this fix), landing in that gap left this row
+  // permanently blank or stuck showing the previous profile's icons
+  // until something else forced a full profile-list rebuild (language
+  // switch, add/rename/delete a profile). Reported live 2026-09-18:
+  // "иногда не хочет отображаться что добавлено в маршрутизацию под
+  // надписью подключено" (routed-apps icons sometimes just don't show
+  // up under "Connected").
+  if (name === includedAppsPreviewRenderedFor) return;
   if (!name) {
+    includedAppsPreviewRenderedFor = name;
     row.style.display = 'none';
     row.innerHTML = '';
     return;
   }
   var cached = includedPreviewCache[name];
   if (cached !== undefined) {
+    includedAppsPreviewRenderedFor = name;
     renderIncludedAppsPreview(cached);
     return;
   }
+  // Deliberately doesn't mark includedAppsPreviewRenderedFor until this
+  // resolves — a transient IPC failure (loadProfile's catch below) must
+  // leave it eligible for a retry on the next poll tick, not get stuck
+  // treated as "already handled" for a profile that never actually
+  // rendered.
   loadProfile(name).then(function(details) {
     var apps = details.IncludedApps || [];
     includedPreviewCache[name] = apps;
     var stillCurrent = state.connected ? state.connectedProfile === name : state.selected === name;
-    if (stillCurrent) renderIncludedAppsPreview(apps);
-  }).catch(function() { /* leave whatever was showing */ });
+    if (stillCurrent) {
+      includedAppsPreviewRenderedFor = name;
+      renderIncludedAppsPreview(apps);
+    }
+  }).catch(function() { /* leave whatever was showing; eligible for retry next tick */ });
 }
 
 function renderIncludedAppsPreview(apps) {
@@ -1335,6 +1365,13 @@ function saveCurrentProfile() {
     return saveProfile(name, $('edit-config').value, state.includedApps, state.includedDomainLists, $('edit-autoconnect').checked, state.editHotkey).then(function() {
       delete includedPreviewCache[name];
       if (oldName && oldName !== name) delete includedPreviewCache[oldName];
+      // Also drop the "already rendered" guard (see refreshIncludedAppsPreview)
+      // — otherwise, since this profile's own name hasn't changed, that
+      // guard would keep skipping the re-render this cache invalidation
+      // is meant to trigger, leaving stale icons showing post-edit.
+      if (includedAppsPreviewRenderedFor === name || includedAppsPreviewRenderedFor === oldName) {
+        includedAppsPreviewRenderedFor = undefined;
+      }
     });
   };
   if (oldName && oldName !== name) {
