@@ -369,6 +369,7 @@ const webUIHTML = `<!DOCTYPE html>
         <span class="switch-slider"></span>
       </label>
     </div>
+    <div id="settings-service-status" class="hint" style="display:none"></div>
     <div class="theme-panel-row">
       <span class="theme-panel-label" data-i18n="themeMode">Mode</span>
       <button id="theme-mode-dark" class="theme-mode-btn" data-i18n="themeDark">Dark</button>
@@ -592,6 +593,9 @@ var I18N = {
     domainsNewList: '+ New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
     domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
     domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "+ New list…" to create one.',
+    serviceNotRunning: 'The Spectrune service isn\'t running — nothing will connect until it is. Start it now?',
+    serviceStarting: 'Starting the service…', serviceStartFailed: 'Could not start the service. Try starting it manually as an administrator.',
+    startNow: 'Start',
   },
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
@@ -641,6 +645,9 @@ var I18N = {
     domainsNewList: '+ Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
     domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
     domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «+ Новый список…», чтобы создать.',
+    serviceNotRunning: 'Служба Spectrune не запущена — без неё ничего не подключится. Запустить сейчас?',
+    serviceStarting: 'Запуск службы…', serviceStartFailed: 'Не удалось запустить службу. Попробуйте запустить её вручную от имени администратора.',
+    startNow: 'Запустить',
   },
 };
 
@@ -1149,8 +1156,27 @@ $('btn-delete').onclick = function() {
 
 // showConfirm replaces the native confirm() popup with an in-theme modal —
 // runs onOk if the user confirms, does nothing on Cancel/overlay click.
-function showConfirm(message, onOk) {
+// okLabel/danger let a caller override the OK button's default "Delete"
+// text and red styling — every prior caller here was a real delete
+// confirmation, so that stayed the default rather than becoming a
+// required argument everywhere. Always reset on entry (rather than only
+// when okLabel is given) since #confirm-ok is one shared, reused DOM
+// element — otherwise a non-danger confirm would leave "Delete"/red
+// showing for the next real delete confirmation after it.
+function showConfirm(message, onOk, okLabel) {
   $('confirm-message').textContent = message;
+  var okBtn = $('confirm-ok');
+  okBtn.textContent = okLabel || t('delete');
+  okBtn.classList.toggle('danger', !okLabel);
+  // applyI18n() re-applies every [data-i18n] element's text on a
+  // language switch — leaving this attribute set while a custom label
+  // is showing would silently revert it back to "Delete" if the user
+  // switches language with this dialog still open.
+  if (okLabel) {
+    okBtn.removeAttribute('data-i18n');
+  } else {
+    okBtn.setAttribute('data-i18n', 'delete');
+  }
   $('confirm-overlay').style.display = 'flex';
   var cleanup;
   var okHandler = function() { cleanup(); onOk(); };
@@ -1868,6 +1894,58 @@ function openSettings() {
     }).catch(function() { /* best-effort — leave it unchecked */ })
       .finally(function() { $('settings-autostart-row').style.display = 'flex'; });
   }
+  checkServiceRunning();
+}
+
+// checkServiceRunning only exists on Windows (isServiceRunning/
+// startServiceElevated, webui_windows.go) — the daemon there is a
+// separate, non-elevated-from-this-GUI process reached only over the
+// named pipe (see ipc.go), so unlike Linux (systemd restarts it on its
+// own and this GUI process IS the same trust level as the daemon) there
+// was previously no way to notice it's down, let alone start it,
+// short of the user opening Services.msc themselves. A stopped service
+// otherwise just shows up as every RPC call failing with an unhelpful
+// connection error, with no obvious next step. Checked every time
+// Settings opens, same as the autostart toggle above — if it's still
+// down after a Cancel, opening Settings again asks again rather than
+// silently giving up on it for the rest of the session.
+function checkServiceRunning() {
+  if (!window.isServiceRunning) return;
+  $('settings-service-status').style.display = 'none';
+  isServiceRunning().then(function(running) {
+    if (running) return;
+    showConfirm(t('serviceNotRunning'), function() {
+      // Shown inside the settings panel itself, not via showListError's
+      // #list-error — that sits in the list view underneath
+      // settings-overlay, invisible while Settings is still open, which
+      // is exactly when this status/error is relevant.
+      var statusEl = $('settings-service-status');
+      statusEl.className = 'hint';
+      statusEl.textContent = t('serviceStarting');
+      statusEl.style.display = 'block';
+      startServiceElevated().then(function(started) {
+        if (!started) {
+          statusEl.className = 'error';
+          statusEl.textContent = t('serviceStartFailed');
+          return;
+        }
+        statusEl.style.display = 'none';
+        // The service being down this whole time already left #list-error
+        // showing a stale "connecting to Spectrune service..." banner
+        // underneath Settings — that's now resolved, but nothing else
+        // clears it once shown (refreshStatus/refreshProfiles below only
+        // ever set it again on a fresh failure, never hide it on
+        // success), so it would otherwise keep showing even after this
+        // visibly worked.
+        $('list-error').style.display = 'none';
+        refreshStatus();
+        refreshProfiles();
+      }).catch(function() {
+        statusEl.className = 'error';
+        statusEl.textContent = t('serviceStartFailed');
+      });
+    }, t('startNow'));
+  }).catch(function() { /* can't tell — don't bother the user over it */ });
 }
 function closeSettings() {
   $('settings-overlay').style.display = 'none';

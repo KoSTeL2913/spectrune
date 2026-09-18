@@ -762,4 +762,19 @@ func bindAPI(w webview2.WebView) {
 	must(w.Bind("setAutostartEnabled", func(enable bool) error {
 		return setAutostartEnabled(enable)
 	}))
+
+	// isServiceRunning/startServiceElevated back the Settings panel's
+	// "service isn't running, start it?" prompt — see
+	// service_check_windows.go's own doc for why this pair (rather than
+	// just letting the usual IPC calls fail) is needed at all, and why
+	// starting it needs a separate elevated call. No Linux equivalent
+	// (feature-detected in webui_html.go via window.isServiceRunning):
+	// the daemon there is managed by systemd, which already restarts it
+	// on its own and doesn't need a GUI-side nudge.
+	must(w.Bind("isServiceRunning", func() bool {
+		return serviceRunningUnprivileged(serviceName)
+	}))
+	must(w.Bind("startServiceElevated", func() (bool, error) {
+		return startServiceElevated()
+	}))
 }
