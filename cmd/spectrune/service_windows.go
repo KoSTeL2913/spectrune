@@ -500,6 +500,35 @@ func installService() error {
 	}
 	defer service.Close()
 
+	// Recovery actions — SCM otherwise leaves a freshly-created service
+	// with none at all, meaning the whole VPN goes silently dark until
+	// someone notices and manually starts it again. Confirmed live
+	// 2026-09-21: an operator's own `Stop-Process -Name spectrune -Force`
+	// meant to close a couple of stray /gui windows matched the /service
+	// process too (Get-Process/Stop-Process key on the image name, which
+	// is identical for /gui and /service — the command line arguments
+	// that actually distinguish them aren't visible to a plain name
+	// match), silently killing the real service; nothing brought it back
+	// until that was noticed from the resulting "no VPN" report. Restart
+	// after 5s/10s/30s (first/second/subsequent failures), reset the
+	// failure count after a day of stability so a bad patch doesn't
+	// permanently exhaust a "3 tries" budget. Covers a real crash and,
+	// via SetRecoveryActionsOnNonCrashFailures, a clean-but-wrong exit
+	// too — not just the exact accidental-kill scenario above, which
+	// already reports as a crash (WIN32_EXIT_CODE 1067) and would have
+	// been covered by SetRecoveryActions alone.
+	recoveryActions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 10 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+	}
+	if err := service.SetRecoveryActions(recoveryActions, uint32((24 * time.Hour).Seconds())); err != nil {
+		log.Printf("installService: SetRecoveryActions failed (non-fatal): %v", err)
+	}
+	if err := service.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		log.Printf("installService: SetRecoveryActionsOnNonCrashFailures failed (non-fatal): %v", err)
+	}
+
 	if err := service.Start(); err != nil {
 		return fmt.Errorf("Start: %w", err)
 	}

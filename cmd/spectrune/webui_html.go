@@ -907,7 +907,29 @@ function refreshProfiles() {
       state.selected = null;
     }
     renderProfileList();
-  }).catch(showListError);
+    state.profilesLoadFailed = false;
+    // Clears any stale error from a prior failed poll (e.g. "connecting
+    // to Spectrune service..." while the service was briefly down) —
+    // nothing previously hid #list-error once shown, so a transient
+    // outage that recovered on its own (SCM auto-restarting the
+    // service, see installService's recovery actions) still left a
+    // scary banner up forever, looking like every profile had vanished
+    // even though this exact successful call just proved otherwise.
+    $('list-error').style.display = 'none';
+  }).catch(function(err) {
+    // Flagged so refreshStatus's 3s poll retries this once the service
+    // is reachable again — refreshProfiles itself is only otherwise
+    // called once at page load plus a handful of specific user actions
+    // (see call sites), never on a timer, so a load that fails at the
+    // exact moment the service happens to be briefly down (a crash, or
+    // literally anything stopping it) previously left the profile list
+    // empty *forever*, not just until the service recovered — reported
+    // live 2026-09-21 as "profile disappeared" when nothing had
+    // actually been lost, the list had just never successfully
+    // reloaded since that one failed attempt.
+    state.profilesLoadFailed = true;
+    showListError(err);
+  });
 }
 
 // ---------- drag-and-drop .conf import ----------
@@ -1086,6 +1108,14 @@ function refreshStatus() {
   // VM: three rapid clicks on Connect, one of them got through as a
   // real duplicate call despite the busy-flag guard.
   return getState().then(function(s) {
+    // getState succeeding proves the service is reachable right now —
+    // if the last refreshProfiles() attempt failed (service was down at
+    // the time, or any other transient IPC error), retry it here so the
+    // profile list actually recovers within one poll tick instead of
+    // staying empty until some unrelated user action happens to call
+    // refreshProfiles() again. See its own doc for the full story.
+    if (state.profilesLoadFailed) refreshProfiles();
+
     state.connected = s.Connected;
     state.connectedProfile = s.ProfileName;
     state.handshakeOK = s.HandshakeOK;
