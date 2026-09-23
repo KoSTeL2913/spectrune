@@ -60,6 +60,8 @@ var (
 	procCallWindowProcW          = moduser32.NewProc("CallWindowProcW")
 	procRegisterHotKey           = moduser32.NewProc("RegisterHotKey")
 	procUnregisterHotKey         = moduser32.NewProc("UnregisterHotKey")
+	procGetWindowLongPtrW        = moduser32.NewProc("GetWindowLongPtrW")
+	procAdjustWindowRectEx       = moduser32.NewProc("AdjustWindowRectEx")
 )
 
 // GWLP_WNDPROC. A var, not a const: uintptr(int(gwlpWndProc)) needs to run
@@ -70,7 +72,51 @@ var (
 // to an unsigned type is simply rejected as overflow.
 var gwlpWndProc int32 = -4
 
+// GWL_STYLE / GWL_EXSTYLE — same negative-constant-needs-a-var story as
+// gwlpWndProc above.
+var gwlStyle int32 = -16
+var gwlExStyle int32 = -20
+
 var origMainWndProc uintptr
+
+// minClientWidth/minClientHeight are the Linux GUI's own hardcoded,
+// hands-on-measured floor (webui_linux.go's setMinSize call) — the
+// smallest the main-list view can go before its 5-button row wraps and
+// the connected-profile card starts getting squeezed. Windows never had
+// an equivalent floor at all until this was reported live 2026-09-23
+// ("так почему на windows я до сих пор могу уменьшать окно?") — the
+// Linux fix (GTK gtk_widget_set_size_request) has no Windows counterpart,
+// so the window could still be shrunk arbitrarily small here. Reusing the
+// same client-area target keeps both platforms' actual usable minimum
+// identical; minTrackSize below converts it to a window-rect size via
+// AdjustWindowRectEx so Windows' own (differently sized) title bar/
+// borders don't eat into that client area the way a raw constant would.
+const (
+	minClientWidth  = 613
+	minClientHeight = 357
+)
+
+type minMaxInfo struct {
+	PtReserved     point
+	PtMaxSize      point
+	PtMaxPosition  point
+	PtMinTrackSize point
+	PtMaxTrackSize point
+}
+
+type winRect struct{ Left, Top, Right, Bottom int32 }
+
+// minTrackSize converts the target client-area minimum into a full
+// window-rect minimum using hwnd's actual current style/exstyle, so the
+// title bar and borders it already has are accounted for exactly instead
+// of guessed at.
+func minTrackSize(hwnd uintptr) (int32, int32) {
+	style, _, _ := procGetWindowLongPtrW.Call(hwnd, uintptr(int(gwlStyle)))
+	exStyle, _, _ := procGetWindowLongPtrW.Call(hwnd, uintptr(int(gwlExStyle)))
+	r := winRect{0, 0, minClientWidth, minClientHeight}
+	procAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle)
+	return r.Right - r.Left, r.Bottom - r.Top
+}
 
 // hideToTrayOnClose subclasses the main WebView2 window so its title-bar
 // close button (and Alt+F4 — both end up posting WM_CLOSE, including via
@@ -86,6 +132,11 @@ func hideToTrayOnClose(hwnd uintptr) {
 			procShowWindow.Call(hwnd, swHide)
 			return 0
 		}
+		if msg == wmGetMinMaxInfo {
+			mmi := (*minMaxInfo)(unsafe.Pointer(lparam))
+			mmi.PtMinTrackSize.X, mmi.PtMinTrackSize.Y = minTrackSize(hwnd)
+			return 0
+		}
 		r, _, _ := procCallWindowProcW.Call(origMainWndProc, hwnd, msg, wparam, lparam)
 		return r
 	})
@@ -94,10 +145,11 @@ func hideToTrayOnClose(hwnd uintptr) {
 }
 
 const (
-	wmDestroy = 0x0002
-	wmClose   = 0x0010
-	wmCommand = 0x0111
-	wmApp     = 0x8000
+	wmDestroy       = 0x0002
+	wmClose         = 0x0010
+	wmGetMinMaxInfo = 0x0024
+	wmCommand       = 0x0111
+	wmApp           = 0x8000
 	// Distinct from go-webview2's own WM_APP (0x8000) use on its window —
 	// this fires on a different hwnd/thread entirely, but +1 keeps it out
 	// of the way regardless.
