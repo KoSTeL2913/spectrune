@@ -9,7 +9,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,31 +21,36 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf16"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-// powershellEncodedCommandArg returns a full "powershell.exe ... -EncodedCommand
-// <blob>" invocation for script, suitable for embedding as a single schtasks
-// /tr value. Used instead of "-File \"<path>\"" — a quoted path nested
-// inside an already-quoted /tr value gets re-parsed at several layers (Go
-// string -> one argv element for schtasks -> schtasks' own /tr parsing ->
-// the actual command line the task runs -> PowerShell's own argv) and
-// reliably broke somewhere in there: reported live 2026-09-23 as a
-// PowerShell window flashing and closing instantly, the script never
-// actually running. -EncodedCommand has no quotes anywhere left to
-// mis-parse, since the whole script is one unbroken Base64 token — the
-// required format is UTF-16LE, no BOM, standard Base64.
-func powershellEncodedCommandArg(script string) string {
-	u16 := utf16.Encode([]rune(script))
-	b := make([]byte, len(u16)*2)
-	for i, v := range u16 {
-		b[i*2] = byte(v)
-		b[i*2+1] = byte(v >> 8)
-	}
-	encoded := base64.StdEncoding.EncodeToString(b)
-	return fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand %s`, encoded)
+// powershellFileArg returns a "powershell.exe ... -File <path>" invocation
+// for a script already written to scriptPath, suitable for embedding as a
+// single schtasks /tr value — deliberately with NO quotes around the path,
+// which is what actually matters here: every script this project schedules
+// lives under updateStateDir() (%ProgramData%\Spectrune, guaranteed
+// space-free), so quoting it was never actually necessary, only ever
+// reflexive.
+//
+// This went through two broken iterations before landing here, both
+// confirmed live on win10-amneziawg 2026-09-23 in the same test session.
+// First: -File "<path>" (quoted out of habit). A quoted value nested
+// inside the already-quoted /tr argument gets re-parsed at several layers
+// (Go string -> one argv element for schtasks -> schtasks' own /tr parsing
+// -> the actual command line the task runs -> PowerShell's own argv) and
+// broke somewhere in there — a PowerShell window flashed and closed
+// instantly, the script never actually running. Second: swapping to
+// -EncodedCommand (a Base64 UTF-16LE blob) to sidestep quoting entirely —
+// which it did, but the resulting /tr value ran well past a real, still-
+// enforced legacy limit in schtasks.exe's own command-line parser
+// (observed failure: "длина ... 261" — length ~261 — in the Russian-
+// locale error text), so `schtasks /create` itself failed outright rather
+// than silently mis-behaving. Dropping the quotes on an already
+// space-free path sidesteps *both*: nothing left to mis-parse, and the
+// command line is short again.
+func powershellFileArg(scriptPath string) string {
+	return fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File %s`, scriptPath)
 }
 
 // latestReleaseURL points at this project's own public GitHub repo — see
@@ -295,9 +299,6 @@ func scheduleInstall(tag, msiPath string) error {
 	fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/i','%s','/qn','/norestart' -Wait\r\n", msiPath)
 	fmt.Fprintf(&b, "schtasks.exe /delete /tn '%s' /f\r\n", taskName)
 	scriptPath := filepath.Join(stateDir, "self-update-install.ps1")
-	// Still written to disk too, purely for post-mortem inspection — see
-	// powershellEncodedCommandArg's doc for why the task itself doesn't
-	// run it via -File.
 	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
@@ -305,7 +306,7 @@ func scheduleInstall(tag, msiPath string) error {
 	triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 	createArgs := []string{
 		"/create", "/tn", taskName,
-		"/tr", powershellEncodedCommandArg(b.String()),
+		"/tr", powershellFileArg(scriptPath),
 		"/sc", "once", "/st", triggerTime,
 		"/ru", "SYSTEM", "/f",
 	}

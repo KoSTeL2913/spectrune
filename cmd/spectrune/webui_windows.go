@@ -683,26 +683,17 @@ func bindAPI(w webview2.WebView) {
 					"Start-Process -FilePath $exe -ArgumentList '/gui-restart'\r\n",
 				exePath,
 			)
-			// Also still written to disk purely so a failure leaves
-			// something inspectable behind — but the Scheduled Task
-			// itself is pointed at -EncodedCommand (a Base64 blob), not
-			// -File "<path>". Reported live 2026-09-23: the -File version
-			// visibly flashed a PowerShell window and closed instantly,
-			// with the relaunch never happening — this whole invocation
-			// passes through several layers of re-parsing (Go string →
-			// one argv element for schtasks /tr → schtasks' own /tr
-			// parsing → the actual command line the task runs → and only
-			// then PowerShell's own argv), and a quoted path *inside* an
-			// already-quoted /tr value is exactly the kind of thing that
-			// breaks somewhere in there. -EncodedCommand sidesteps all of
-			// it: no quotes anywhere in the script to mis-parse, since the
-			// whole thing is one unbroken Base64 token.
+			// See powershellFileArg's doc for why this is an unquoted
+			// -File <path> rather than -File "<path>" or -EncodedCommand —
+			// both tried and broken in this same test session 2026-09-23.
 			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
-			_ = os.WriteFile(scriptPath, []byte(script), 0o644)
+			if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+				return err
+			}
 			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 			createArgs = []string{
 				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-				"/tr", powershellEncodedCommandArg(script),
+				"/tr", powershellFileArg(scriptPath),
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		}
