@@ -156,6 +156,12 @@ const webUIHTML = `<!DOCTYPE html>
     background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); color: #fff; border-color: transparent;
   }
   .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; flex-shrink: 0; }
+  /* Applies only inside a [data-reorder] row — plain .row buttons elsewhere
+     (Save/Cancel dialogs, theme swatches, etc.) are never draggable, so
+     this never fights an ordinary click. */
+  [data-reorder] > button { cursor: grab; }
+  [data-reorder] > button:active { cursor: grabbing; }
+  [data-reorder] > button.dragging { opacity: .6; box-shadow: 0 0 0 2px var(--accent); position: relative; z-index: 1; }
   button {
     padding: 7px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--chip-bg);
     color: var(--ink); cursor: pointer; font-size: 13px; transition: background .12s ease, filter .12s ease;
@@ -409,7 +415,7 @@ const webUIHTML = `<!DOCTYPE html>
 <div id="view-list" class="view active">
   <div id="list-error" class="error" style="display:none"></div>
   <ul id="profile-list" class="profile-list flex-grow"></ul>
-  <div class="row">
+  <div class="row" data-reorder="list-actions">
     <button id="btn-add" data-i18n="add">Add…</button>
     <button id="btn-edit" disabled data-i18n="edit">Edit…</button>
     <button id="btn-apps" disabled data-i18n="apps">Apps…</button>
@@ -444,25 +450,28 @@ const webUIHTML = `<!DOCTYPE html>
   </div>
   <label for="edit-config" style="margin-top:14px" data-i18n="configLabel">Configuration</label>
   <textarea id="edit-config" class="flex-grow" spellcheck="false"></textarea>
-  <div class="row" style="margin-top:10px">
+  <div class="row" data-reorder="edit-subviews" style="margin-top:10px">
     <button id="btn-open-apps">Apps: 0 selected…</button>
     <button id="btn-open-domains">Domains: 0 enabled…</button>
   </div>
   <div class="row">
     <button id="btn-import" data-i18n="importFile">Import from file…</button>
   </div>
-  <div class="row">
+  <div class="row" data-reorder="edit-save-cancel">
     <button id="btn-save" class="primary" data-i18n="save">Save</button>
     <button id="btn-cancel" data-i18n="cancel">Cancel</button>
   </div>
 </div>
 
 <div id="view-apps" class="view">
-  <button class="backlink" id="apps-back" data-i18n="done">&larr; Done</button>
+  <div class="row" style="margin-bottom:8px">
+    <button class="backlink" id="apps-back" data-i18n="done">&larr; Done</button>
+    <button class="backlink" id="btn-apps-cancel" data-i18n="cancel">Cancel</button>
+  </div>
   <h1 data-i18n="applications">Applications</h1>
   <p class="hint" data-i18n="appsHint">Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Add…" to browse for one not listed here.</p>
   <input type="text" id="apps-search" data-i18n-placeholder="searchPlaceholder" placeholder="Search installed applications…">
-  <div class="row">
+  <div class="row" data-reorder="apps-select">
     <button id="btn-select-all" data-i18n="selectAll">Select all</button>
     <button id="btn-clear-all" data-i18n="clearSelection">Clear selection</button>
   </div>
@@ -493,7 +502,7 @@ const webUIHTML = `<!DOCTYPE html>
   <h1 id="domain-edit-title"></h1>
   <p class="hint" data-i18n="domainEditHint">One domain per line (e.g. discord.com) — subdomains are matched automatically.</p>
   <textarea id="domain-edit-text" class="flex-grow" spellcheck="false"></textarea>
-  <div class="row">
+  <div class="row" data-reorder="domain-edit-save-cancel">
     <button id="btn-domain-edit-save" class="primary" data-i18n="save">Save</button>
     <button id="btn-domain-edit-cancel" data-i18n="cancel">Cancel</button>
   </div>
@@ -1265,6 +1274,10 @@ function showPrompt(message, defaultValue, onOk, hint) {
 }
 $('btn-apps').onclick = function() {
   if (!state.selected) return;
+  // Opened straight from the main list, not from within an in-progress
+  // edit — Cancel should drop the user back there, not into the edit
+  // screen this jump only visits as an implementation detail.
+  state.appsOrigin = 'list';
   openEdit(state.selected, 'apps');
 };
 $('btn-domains').onclick = function() {
@@ -1385,7 +1398,11 @@ $('btn-hotkey-clear').onclick = function() {
 
 $('edit-back').onclick = function() { stopHotkeyCapture(); show('view-list'); };
 $('btn-cancel').onclick = function() { stopHotkeyCapture(); show('view-list'); };
-$('btn-open-apps').onclick = function() { stopHotkeyCapture(); openAppsPicker(); };
+$('btn-open-apps').onclick = function() {
+  stopHotkeyCapture();
+  state.appsOrigin = 'edit'; // opened from mid-edit — Cancel returns here, not the list
+  openAppsPicker();
+};
 $('btn-open-domains').onclick = function() { stopHotkeyCapture(); openDomainsPicker(); };
 $('btn-import').onclick = function() {
   importConfig().then(function(result) {
@@ -1462,6 +1479,10 @@ function updateAppsCount() { $('btn-open-apps').textContent = tf('appsSelected',
 function openAppsPicker() {
   $('apps-search').value = '';
   state.appsFilter = '';
+  // Snapshot so "Cancel" can discard whatever gets toggled/select-all'd/
+  // cleared/preset-loaded in this view without touching the profile at
+  // all — "Done" is the only path that's supposed to commit apps changes.
+  state.includedAppsSnapshot = state.includedApps.slice();
   show('view-apps');
   listInstalledApps().then(function(apps) {
     state.installedApps = apps || [];
@@ -1637,6 +1658,16 @@ $('apps-back').onclick = function() {
     show('view-list');
     refreshProfiles();
   }).catch(function(err) { show('view-edit'); showEditError(err); });
+};
+$('btn-apps-cancel').onclick = function() {
+  // Unlike "Done", this never saves anything — just throws away whatever
+  // got toggled/select-all'd/cleared/preset-loaded since the view opened,
+  // and returns to wherever this view was opened from: the main list if
+  // opened via its "Apps…" button, or the edit screen if opened via
+  // "Apps: N selected…" while already mid-edit (see appsOrigin above).
+  state.includedApps = (state.includedAppsSnapshot || state.includedApps).slice();
+  updateAppsCount();
+  show(state.appsOrigin === 'list' ? 'view-list' : 'view-edit');
 };
 $('btn-browse-app').onclick = function() {
   browseForExe().then(function(path) {
@@ -1845,6 +1876,12 @@ function applyTheme() {
   root.style.setProperty('--grad', 'linear-gradient(135deg, ' + c1 + ' 0%, ' + c2 + ' 100%)');
   applyBackgroundImage();
   renderThemePicker();
+  // Windows only (feature-detected — no such binding on Linux, where the
+  // window has no native title bar to color in the first place) and only
+  // takes visible effect on Windows 11: colors the actual OS title bar to
+  // match the app's accent instead of leaving it whatever stock color
+  // Windows uses.
+  if (window.setTitleBarColor) window.setTitleBarColor(c1);
 }
 
 function applyBackgroundImage() {
@@ -2105,11 +2142,108 @@ document.querySelectorAll('.theme-swatch').forEach(function(el) {
   el.onclick = function() { setThemeAccent(el.getAttribute('data-accent')); };
 });
 
+// ---------- reorderable button rows ----------
+// Lets the user drag buttons within a [data-reorder] row into whatever
+// order they prefer (e.g. put "Delete" first instead of last), remembered
+// per row via localStorage so it's a one-time arrangement, not something
+// re-done every launch. Deliberately opt-in per row (via the data-reorder
+// attribute) rather than global — dialog button rows like Save/Cancel
+// confirms keep a fixed, predictable order since those matter for safety,
+// while pure action-toolbar rows (list actions, apps select-all row, etc.)
+// are pure preference and safe to let the user rearrange.
+
+function initReorderableRows() {
+  document.querySelectorAll('[data-reorder]').forEach(setUpReorderableRow);
+}
+
+// Pointer Events rather than native HTML5 draggable/dragstart/dragover —
+// WebKitGTK's HTML5 drag-and-drop support (the webview backend used on
+// Linux) doesn't reliably fire dragstart for in-page reordering, so the
+// first cut of this (native DnD) silently did nothing for most users.
+// Pointer Events are just plain mouse tracking under the hood and work
+// identically across WebKitGTK, WebView2 and every other backend this
+// app embeds.
+function setUpReorderableRow(row) {
+  var key = 'buttonOrder:' + row.getAttribute('data-reorder');
+
+  try {
+    var saved = JSON.parse(localStorage.getItem(key) || 'null');
+    if (Array.isArray(saved)) {
+      saved.forEach(function(id) {
+        var el = id && row.querySelector('#' + CSS.escape(id));
+        if (el) row.appendChild(el);
+      });
+    }
+  } catch (e) {}
+
+  function persistOrder() {
+    var ids = Array.prototype.map.call(row.children, function(el) { return el.id; }).filter(Boolean);
+    try { localStorage.setItem(key, JSON.stringify(ids)); } catch (e) {}
+  }
+
+  // Where dragEl would land among its *other* siblings for pointer x —
+  // the sibling immediately after the insertion point, or null for "at
+  // the end". Ignores dragEl itself so it doesn't compare against its
+  // own current position.
+  function siblingAfterFor(dragEl, x) {
+    var others = Array.prototype.filter.call(row.children, function(el) { return el !== dragEl; });
+    for (var i = 0; i < others.length; i++) {
+      var box = others[i].getBoundingClientRect();
+      if (x < box.left + box.width / 2) return others[i];
+    }
+    return null;
+  }
+
+  Array.prototype.forEach.call(row.children, function(btn) {
+    btn.style.touchAction = 'none';
+    var startX = 0, startY = 0, moved = false;
+
+    btn.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      moved = false;
+      btn.setPointerCapture(e.pointerId);
+    });
+
+    btn.addEventListener('pointermove', function(e) {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      if (!moved) {
+        // Small threshold so an ordinary click never gets misread as a
+        // drag because of a pixel of mouse jitter between press/release.
+        if (Math.abs(e.clientX - startX) < 4 && Math.abs(e.clientY - startY) < 4) return;
+        moved = true;
+        btn.classList.add('dragging');
+      }
+      var after = siblingAfterFor(btn, e.clientX);
+      if (after !== btn.nextSibling) row.insertBefore(btn, after);
+    });
+
+    function endDrag(e) {
+      if (!btn.hasPointerCapture(e.pointerId)) return;
+      btn.releasePointerCapture(e.pointerId);
+      if (moved) {
+        btn.classList.remove('dragging');
+        persistOrder();
+        // The pointerup that ends a drag would otherwise also fire this
+        // button's own click handler (e.g. re-opening "Add…" right after
+        // the user finished dragging it) — swallow exactly that one.
+        var suppressClick = function(ev) { ev.stopPropagation(); };
+        btn.addEventListener('click', suppressClick, { capture: true, once: true });
+      }
+      moved = false;
+    }
+    btn.addEventListener('pointerup', endDrag);
+    btn.addEventListener('pointercancel', endDrag);
+  });
+}
+
 // ---------- startup ----------
 
 
 applyTheme();
 applyI18n();
+initReorderableRows();
 refreshProfiles();
 refreshStatus();
 setInterval(refreshStatus, 3000);

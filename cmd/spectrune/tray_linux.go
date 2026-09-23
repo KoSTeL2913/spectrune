@@ -31,6 +31,28 @@ static void spectrune_window_show(GtkWidget *win) {
 	gtk_window_present(GTK_WINDOW(win));
 }
 
+// spectrune_set_min_size overrides the WebKitGTK view's own default minimum
+// size request, which is what actually stops the user dragging the window
+// edge narrower — webview_go's SetSize(..., HintNone) only calls
+// gtk_window_resize (the initial size), it never touches this, and GTK
+// otherwise won't let a window shrink below its content's natural minimum
+// regardless of the window itself being resizable. Requested by the user
+// 2026-09-23: they want to be able to shrink the window down to however
+// narrow the button rows can flex-wrap to (webui_html.go's .row already
+// has flex-wrap: wrap for exactly this), not stuck at WebKitGTK's inflated
+// floor — but not below that, or button/header text starts clipping
+// instead of wrapping. A hardcoded guess here (first cut: 200x300) proved
+// too small in practice — the JS side now measures its own actual widest
+// button after layout and calls back in via the setMinWindowSize binding
+// (webui_html.go), so this only sets a coarse fallback for the brief
+// window before that first call lands.
+static void spectrune_set_min_size(GtkWidget *win, int width, int height) {
+	GtkWidget *child = gtk_bin_get_child(GTK_BIN(win));
+	if (child) {
+		gtk_widget_set_size_request(child, width, height);
+	}
+}
+
 static GtkStatusIcon* spectrune_tray_new(const char *iconPath) {
 	GtkStatusIcon *icon = gtk_status_icon_new_from_file(iconPath);
 	gtk_status_icon_set_visible(icon, TRUE);
@@ -292,6 +314,13 @@ func hideToTrayOnClose(win unsafe.Pointer) {
 // and a second /gui launch's activate-existing-window path.
 func showWindow(win unsafe.Pointer) {
 	C.spectrune_window_show((*C.GtkWidget)(win))
+}
+
+// setMinSize lets win be resized down to (width, height) instead of being
+// stuck at WebKitGTK's own default minimum — see spectrune_set_min_size's
+// comment for why this is needed at all.
+func setMinSize(win unsafe.Pointer, width, height int) {
+	C.spectrune_set_min_size((*C.GtkWidget)(win), C.int(width), C.int(height))
 }
 
 //export goTrayPopupMenu

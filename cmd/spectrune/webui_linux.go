@@ -94,6 +94,15 @@ func runGUI() {
 	// not two.
 
 	hwin := w.Window()
+	// 613x357 is the user's own hands-on minimum (2026-09-23): shrunk the
+	// window down live until the main list's button row was about to
+	// clip/wrap (width) and the connected profile card was about to get
+	// squeezed away (height), then asked for that exact size locked in
+	// as the floor — after JS-side attempts to *compute* the width part
+	// (summing button widths, then scrollWidth with flex-wrap: nowrap)
+	// each came up short by the same ~50px for reasons never fully
+	// pinned down.
+	setMinSize(hwin, 613, 357)
 
 	tray, err := newTrayIcon(w,
 		func() { w.Dispatch(func() { showWindow(hwin) }) },

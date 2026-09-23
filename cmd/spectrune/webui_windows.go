@@ -226,6 +226,11 @@ func runGUI(retryMutex bool) {
 
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
+	if err := w.Bind("setTitleBarColor", func(hex string) error {
+		return setTitleBarColor(hwnd, hex)
+	}); err != nil {
+		log.Fatalf("Bind: %v", err)
+	}
 	// Stashed for closeForUpdate's binding below — bindAPI(w) (called
 	// just above, before hwnd existed yet) can't close over a local
 	// declared after it, and closeForUpdate needs the same clean-

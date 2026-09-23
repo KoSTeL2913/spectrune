@@ -47,10 +47,10 @@ var tcpTableCache struct {
 	fetched time.Time
 }
 
-func fetchTCPTable() ([]byte, error) {
+func fetchTCPTable(force bool) ([]byte, error) {
 	tcpTableCache.Lock()
 	defer tcpTableCache.Unlock()
-	if time.Since(tcpTableCache.fetched) < tcpTableCacheTTL && tcpTableCache.buf != nil {
+	if !force && time.Since(tcpTableCache.fetched) < tcpTableCacheTTL && tcpTableCache.buf != nil {
 		return tcpTableCache.buf, nil
 	}
 
@@ -102,7 +102,21 @@ func findTCPOwnerPID(localPort uint16) (uint32, error) {
 		if attempt > 0 {
 			time.Sleep(ownerLookupDelay)
 		}
-		pid, err := findTCPOwnerPIDOnce(localPort)
+		// force=true from the 2nd attempt on: the table cache's TTL
+		// (200ms) comfortably outlives this whole retry loop (4
+		// attempts * 3ms = 12ms), so without forcing a bypass every
+		// retry was handing back the exact same cached snapshot as
+		// the first attempt — the retry never actually re-queried
+		// Windows, defeating the race-closing purpose. Harmless on a
+		// single isolated connection (which just re-reads a cache
+		// that happened to already be fresh), but during a page-load
+		// burst of TCP connections all opened within the same
+		// ~200ms cache window, every single one of them lost the
+		// race in lockstep and came back pid=0/exe="?", silently
+		// routing the whole page load direct instead of through the
+		// tunnel. Confirmed live on win11-amneziawg 2026-09-22 (see
+		// [[per_app_routing_tcp_race]]).
+		pid, err := findTCPOwnerPIDOnce(localPort, attempt > 0)
 		if err == nil {
 			return pid, nil
 		}
@@ -111,8 +125,8 @@ func findTCPOwnerPID(localPort uint16) (uint32, error) {
 	return 0, lastErr
 }
 
-func findTCPOwnerPIDOnce(localPort uint16) (uint32, error) {
-	buf, err := fetchTCPTable()
+func findTCPOwnerPIDOnce(localPort uint16, force bool) (uint32, error) {
+	buf, err := fetchTCPTable(force)
 	if err != nil {
 		return 0, err
 	}
@@ -153,10 +167,10 @@ var (
 	}
 )
 
-func fetchUDPTable() ([]byte, error) {
+func fetchUDPTable(force bool) ([]byte, error) {
 	udpTableCache.Lock()
 	defer udpTableCache.Unlock()
-	if time.Since(udpTableCache.fetched) < tcpTableCacheTTL && udpTableCache.buf != nil {
+	if !force && time.Since(udpTableCache.fetched) < tcpTableCacheTTL && udpTableCache.buf != nil {
 		return udpTableCache.buf, nil
 	}
 
@@ -186,7 +200,10 @@ func findUDPOwnerPID(localPort uint16) (uint32, error) {
 		if attempt > 0 {
 			time.Sleep(ownerLookupDelay)
 		}
-		pid, err := findUDPOwnerPIDOnce(localPort)
+		// See the matching comment in findTCPOwnerPID: without forcing
+		// a cache bypass, retries within the same ~200ms table-cache
+		// TTL just re-read the identical stale snapshot.
+		pid, err := findUDPOwnerPIDOnce(localPort, attempt > 0)
 		if err == nil {
 			return pid, nil
 		}
@@ -195,8 +212,8 @@ func findUDPOwnerPID(localPort uint16) (uint32, error) {
 	return 0, lastErr
 }
 
-func findUDPOwnerPIDOnce(localPort uint16) (uint32, error) {
-	buf, err := fetchUDPTable()
+func findUDPOwnerPIDOnce(localPort uint16, force bool) (uint32, error) {
+	buf, err := fetchUDPTable(force)
 	if err != nil {
 		return 0, err
 	}
