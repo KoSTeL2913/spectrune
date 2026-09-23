@@ -34,6 +34,8 @@ var (
 	procLoadImageW         = moduser32.NewProc("LoadImageW")
 	procSendMessageW       = moduser32.NewProc("SendMessageW")
 	procFindWindowW        = moduser32.NewProc("FindWindowW")
+	procAttachThreadInput  = moduser32.NewProc("AttachThreadInput")
+	procGetWindowThreadPID = moduser32.NewProc("GetWindowThreadProcessId")
 )
 
 // registerForRestart tells Windows Restart Manager: if you ever have to
@@ -81,13 +83,46 @@ func activateExistingGUIWindow() bool {
 	if hwnd == 0 {
 		return false
 	}
+	// SW_SHOW first, THEN SW_RESTORE — belt and suspenders for exactly
+	// which one actually reverses hideToTrayOnClose's ShowWindow(SW_HIDE)
+	// reliably: SW_RESTORE's documented job is un-minimizing a window
+	// that's minimized-but-still-shown, not necessarily un-hiding one
+	// that's fully hidden; SW_SHOW is the one Win32 actually documents
+	// for that.
+	procShowWindow.Call(hwnd, swShow)
 	procShowWindow.Call(hwnd, swRestore)
+	// Plain SetForegroundWindow from here routinely loses to Windows'
+	// foreground-lock restriction: the calling process IS this fresh
+	// /gui launch (which does have the user-input-triggered right to
+	// take foreground), but the WINDOW it's trying to raise belongs to
+	// a completely different process, and Windows only honors that for
+	// the process that itself has the right, not whatever window it
+	// asks for. The documented, standard workaround is to attach this
+	// thread's input state to the target window's thread first — while
+	// attached, Windows treats a SetForegroundWindow call from either
+	// thread as if it came from the (allowed) one. Without this, the
+	// call still "succeeds" (no error) but silently does nothing beyond
+	// flashing the target's taskbar button — exactly what was reported
+	// live 2026-09-23 ("моргает и все", clicking the desktop icon while
+	// already running just blinks and brings nothing forward).
+	var targetPID uint32
+	targetTID, _, _ := procGetWindowThreadPID.Call(hwnd, uintptr(unsafe.Pointer(&targetPID)))
+	currentTID := windows.GetCurrentThreadId()
+	attached := false
+	if targetTID != 0 && uint32(targetTID) != currentTID {
+		ret, _, _ := procAttachThreadInput.Call(uintptr(currentTID), targetTID, 1)
+		attached = ret != 0
+	}
 	procSetForegroundWindow.Call(hwnd)
+	if attached {
+		procAttachThreadInput.Call(uintptr(currentTID), targetTID, 0)
+	}
 	return true
 }
 
 const (
 	swHide    = 0
+	swShow    = 5
 	swRestore = 9
 
 	imageIcon      = 1
@@ -194,8 +229,31 @@ func runGUI(retryMutex bool) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	if mutexErr == windows.ERROR_ALREADY_EXISTS {
-		if !activateExistingGUIWindow() {
-			log.Printf("another Spectrune GUI instance is already running but its window wasn't found — exiting anyway")
+		// Hide this second process's own console window immediately —
+		// previously only the "we won the mutex" branch below ever called
+		// hideConsoleWindow, so every *second* launch flashed a console
+		// window for its whole (brief) lifetime before exiting. Reported
+		// live 2026-09-23 as "clicking the desktop icon just blinks and
+		// does nothing" — with the real window failing to visibly come
+		// forward (see the retry below), that flash was the only visible
+		// feedback at all, easy to mistake for the click doing nothing.
+		hideConsoleWindow()
+		// A couple retries, not just one shot — activateExistingGUIWindow
+		// finds the other window by exact title via FindWindowW, and a
+		// launch that races the *other* instance's own startup (still
+		// mid-navigate, title not applied yet — unlikely but not
+		// impossible) would otherwise fail this permanently instead of
+		// just needing a moment.
+		activated := false
+		for attempt := 0; attempt < 3; attempt++ {
+			if activateExistingGUIWindow() {
+				activated = true
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !activated {
+			log.Printf("another Spectrune GUI instance is already running but its window wasn't found after retrying — exiting anyway")
 		}
 		return
 	}
