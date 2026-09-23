@@ -9,6 +9,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,9 +22,32 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
 
 	"golang.org/x/sys/windows/registry"
 )
+
+// powershellEncodedCommandArg returns a full "powershell.exe ... -EncodedCommand
+// <blob>" invocation for script, suitable for embedding as a single schtasks
+// /tr value. Used instead of "-File \"<path>\"" — a quoted path nested
+// inside an already-quoted /tr value gets re-parsed at several layers (Go
+// string -> one argv element for schtasks -> schtasks' own /tr parsing ->
+// the actual command line the task runs -> PowerShell's own argv) and
+// reliably broke somewhere in there: reported live 2026-09-23 as a
+// PowerShell window flashing and closing instantly, the script never
+// actually running. -EncodedCommand has no quotes anywhere left to
+// mis-parse, since the whole script is one unbroken Base64 token — the
+// required format is UTF-16LE, no BOM, standard Base64.
+func powershellEncodedCommandArg(script string) string {
+	u16 := utf16.Encode([]rune(script))
+	b := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		b[i*2] = byte(v)
+		b[i*2+1] = byte(v >> 8)
+	}
+	encoded := base64.StdEncoding.EncodeToString(b)
+	return fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand %s`, encoded)
+}
 
 // latestReleaseURL points at this project's own public GitHub repo — see
 // https://github.com/KoSTeL2913/spectrune/releases. Public repo, so the
@@ -271,6 +295,9 @@ func scheduleInstall(tag, msiPath string) error {
 	fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/i','%s','/qn','/norestart' -Wait\r\n", msiPath)
 	fmt.Fprintf(&b, "schtasks.exe /delete /tn '%s' /f\r\n", taskName)
 	scriptPath := filepath.Join(stateDir, "self-update-install.ps1")
+	// Still written to disk too, purely for post-mortem inspection — see
+	// powershellEncodedCommandArg's doc for why the task itself doesn't
+	// run it via -File.
 	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
@@ -278,7 +305,7 @@ func scheduleInstall(tag, msiPath string) error {
 	triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 	createArgs := []string{
 		"/create", "/tn", taskName,
-		"/tr", fmt.Sprintf(`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"`, scriptPath),
+		"/tr", powershellEncodedCommandArg(b.String()),
 		"/sc", "once", "/st", triggerTime,
 		"/ru", "SYSTEM", "/f",
 	}

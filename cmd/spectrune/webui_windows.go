@@ -9,7 +9,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net/url"
@@ -18,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
@@ -633,15 +631,30 @@ func bindAPI(w webview2.WebView) {
 			// takes. Crucially this polls via PowerShell, never by
 			// running spectrune.exe itself — launching the target exe
 			// early to check on it would recreate the exact file lock
-			// this whole mechanism exists to avoid. Waits for BOTH the
-			// service to report Running again AND the exe's own
-			// LastWriteTime to have actually changed from its value
-			// right now (belt and suspenders — a service can restart
-			// without the file having actually been replaced yet, e.g.
-			// a stray earlier restart racing with this one), falling
-			// back to launching anyway once the poll gives up after
-			// ~80s so a genuinely stuck install doesn't leave the GUI
-			// gone forever.
+			// this whole mechanism exists to avoid.
+			//
+			// Waits for scheduleInstall's own SpectruneSelfUpdateInstall
+			// task to be gone — that task's very last line is its own
+			// self-delete, reached only once BOTH the old version's
+			// `msiexec /x` and the new version's `msiexec /i` have run to
+			// completion (each with -Wait), so the task's continued
+			// existence is an authoritative "still mid-transaction"
+			// signal. An earlier version of this check instead waited for
+			// "service reports Running again AND the exe's mtime
+			// changed" — reported live 2026-09-23 as everything
+			// (including the Start Menu/desktop shortcuts) ending up gone
+			// after an update: that heuristic can turn true WHILE the
+			// install is still in progress (e.g. right after the new
+			// MSI's InstallService custom action starts the service, but
+			// before later steps like shortcut creation have run), and
+			// this script launching a fresh spectrune.exe process at that
+			// exact moment — reopening the very file msiexec still needs
+			// to finish working with — reproduces the identical
+			// file-in-use problem the whole Scheduled-Task architecture
+			// exists to avoid, this time on the MSI's own later steps
+			// instead of the GUI's exe. Falls back to launching anyway
+			// once the poll gives up after ~80s so a genuinely stuck
+			// install doesn't leave the GUI gone forever.
 			stateDir, dirErr := updateStateDir()
 			if dirErr != nil {
 				return dirErr
@@ -649,23 +662,26 @@ func bindAPI(w webview2.WebView) {
 			if err := os.MkdirAll(stateDir, 0o755); err != nil {
 				return err
 			}
-			before := time.Now()
-			if fi, statErr := os.Stat(exePath); statErr == nil {
-				before = fi.ModTime()
-			}
+			// $seen guards against the install task not existing *yet* —
+			// updateInProgress flips true (which is what triggers this
+			// whole closeForUpdate call) right as installRelease starts,
+			// before it's even finished downloading the MSI, let alone
+			// gotten to scheduleInstall actually creating the task. So
+			// "task not found" only means "done" once the task has
+			// actually been observed running at least once first;
+			// otherwise it just means "hasn't started yet" and this loop
+			// keeps waiting instead of firing immediately.
 			script := fmt.Sprintf(
 				"$exe = '%s'\r\n"+
-					"$before = [datetime]'%s'\r\n"+
+					"$seen = $false\r\n"+
 					"for ($i = 0; $i -lt 40; $i++) {\r\n"+
 					"    Start-Sleep -Seconds 2\r\n"+
-					"    try {\r\n"+
-					"        $svc = Get-Service SpectruneService -ErrorAction Stop\r\n"+
-					"        $now = (Get-Item $exe -ErrorAction Stop).LastWriteTime\r\n"+
-					"        if ($svc.Status -eq 'Running' -and $now -ne $before) { break }\r\n"+
-					"    } catch {}\r\n"+
+					"    schtasks /query /tn 'SpectruneSelfUpdateInstall' 2>$null 1>$null\r\n"+
+					"    if ($LASTEXITCODE -eq 0) { $seen = $true }\r\n"+
+					"    elseif ($seen) { break }\r\n"+
 					"}\r\n"+
 					"Start-Process -FilePath $exe -ArgumentList '/gui-restart'\r\n",
-				exePath, before.Format("2006-01-02T15:04:05.0000000"),
+				exePath,
 			)
 			// Also still written to disk purely so a failure leaves
 			// something inspectable behind — but the Scheduled Task
@@ -683,17 +699,10 @@ func bindAPI(w webview2.WebView) {
 			// whole thing is one unbroken Base64 token.
 			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
 			_ = os.WriteFile(scriptPath, []byte(script), 0o644)
-			utf16Script := utf16.Encode([]rune(script))
-			scriptBytes := make([]byte, len(utf16Script)*2)
-			for i, u := range utf16Script {
-				scriptBytes[i*2] = byte(u)
-				scriptBytes[i*2+1] = byte(u >> 8)
-			}
-			encoded := base64.StdEncoding.EncodeToString(scriptBytes)
 			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 			createArgs = []string{
 				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-				"/tr", fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand %s`, encoded),
+				"/tr", powershellEncodedCommandArg(script),
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		}
