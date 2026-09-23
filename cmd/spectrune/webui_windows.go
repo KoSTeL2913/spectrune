@@ -325,6 +325,23 @@ func runGUI(retryMutex bool) {
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
 	forceForeground(hwnd)
+	// A second, delayed reassertion — confirmed live 2026-09-23 that the
+	// immediate call above can win the race and then silently lose
+	// foreground again moments later: a Tab sent right after launch
+	// reliably reached the webview and produced a real focus ring, but
+	// the exact same Enter sent ~1-2s afterward landed back in the
+	// launching PowerShell console instead. WebView2's environment/
+	// controller setup and first navigation finish asynchronously well
+	// after NewWithOptions returns and the window is already shown —
+	// something in that async tail (controller creation, first
+	// navigation completing, or the WebView2 child HWND being resized/
+	// reparented once content is ready) appears to reset activation.
+	// Firing forceForeground again once that's had time to settle wins
+	// back whatever it took.
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		w.Dispatch(func() { forceForeground(hwnd) })
+	}()
 	if err := w.Bind("setTitleBarColor", func(hex string) error {
 		return setTitleBarColor(hwnd, hex)
 	}); err != nil {
