@@ -9,6 +9,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
@@ -651,7 +653,6 @@ func bindAPI(w webview2.WebView) {
 			if fi, statErr := os.Stat(exePath); statErr == nil {
 				before = fi.ModTime()
 			}
-			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
 			script := fmt.Sprintf(
 				"$exe = '%s'\r\n"+
 					"$before = [datetime]'%s'\r\n"+
@@ -666,13 +667,33 @@ func bindAPI(w webview2.WebView) {
 					"Start-Process -FilePath $exe -ArgumentList '/gui-restart'\r\n",
 				exePath, before.Format("2006-01-02T15:04:05.0000000"),
 			)
-			if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
-				return err
+			// Also still written to disk purely so a failure leaves
+			// something inspectable behind — but the Scheduled Task
+			// itself is pointed at -EncodedCommand (a Base64 blob), not
+			// -File "<path>". Reported live 2026-09-23: the -File version
+			// visibly flashed a PowerShell window and closed instantly,
+			// with the relaunch never happening — this whole invocation
+			// passes through several layers of re-parsing (Go string →
+			// one argv element for schtasks /tr → schtasks' own /tr
+			// parsing → the actual command line the task runs → and only
+			// then PowerShell's own argv), and a quoted path *inside* an
+			// already-quoted /tr value is exactly the kind of thing that
+			// breaks somewhere in there. -EncodedCommand sidesteps all of
+			// it: no quotes anywhere in the script to mis-parse, since the
+			// whole thing is one unbroken Base64 token.
+			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
+			_ = os.WriteFile(scriptPath, []byte(script), 0o644)
+			utf16Script := utf16.Encode([]rune(script))
+			scriptBytes := make([]byte, len(utf16Script)*2)
+			for i, u := range utf16Script {
+				scriptBytes[i*2] = byte(u)
+				scriptBytes[i*2+1] = byte(u >> 8)
 			}
+			encoded := base64.StdEncoding.EncodeToString(scriptBytes)
 			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 			createArgs = []string{
 				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-				"/tr", fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File "%s"`, scriptPath),
+				"/tr", fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand %s`, encoded),
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		}
