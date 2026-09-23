@@ -26,16 +26,17 @@ import (
 )
 
 var (
-	modkernel32            = windows.NewLazySystemDLL("kernel32.dll")
-	procGetConsoleWindow   = modkernel32.NewProc("GetConsoleWindow")
-	procRegisterAppRestart = modkernel32.NewProc("RegisterApplicationRestart")
-	moduser32              = windows.NewLazySystemDLL("user32.dll")
-	procShowWindow         = moduser32.NewProc("ShowWindow")
-	procLoadImageW         = moduser32.NewProc("LoadImageW")
-	procSendMessageW       = moduser32.NewProc("SendMessageW")
-	procFindWindowW        = moduser32.NewProc("FindWindowW")
-	procAttachThreadInput  = moduser32.NewProc("AttachThreadInput")
-	procGetWindowThreadPID = moduser32.NewProc("GetWindowThreadProcessId")
+	modkernel32             = windows.NewLazySystemDLL("kernel32.dll")
+	procGetConsoleWindow    = modkernel32.NewProc("GetConsoleWindow")
+	procRegisterAppRestart  = modkernel32.NewProc("RegisterApplicationRestart")
+	moduser32               = windows.NewLazySystemDLL("user32.dll")
+	procShowWindow          = moduser32.NewProc("ShowWindow")
+	procLoadImageW          = moduser32.NewProc("LoadImageW")
+	procSendMessageW        = moduser32.NewProc("SendMessageW")
+	procFindWindowW         = moduser32.NewProc("FindWindowW")
+	procAttachThreadInput   = moduser32.NewProc("AttachThreadInput")
+	procGetWindowThreadPID  = moduser32.NewProc("GetWindowThreadProcessId")
+	procGetForegroundWindow = moduser32.NewProc("GetForegroundWindow")
 )
 
 // registerForRestart tells Windows Restart Manager: if you ever have to
@@ -118,6 +119,45 @@ func activateExistingGUIWindow() bool {
 		procAttachThreadInput.Call(uintptr(currentTID), targetTID, 0)
 	}
 	return true
+}
+
+// forceForeground makes hwnd — THIS process's own, just-created GUI
+// window — the actual OS foreground/focused window. WebView2's AutoFocus
+// option (runGUI's WindowOptions below) only gives the WebView2 control
+// focus *within* the window; it does nothing if the window itself never
+// becomes the foreground window in the first place, which is exactly what
+// happens when spectrune.exe is launched from a non-interactive parent —
+// a PowerShell script (relaunch-wait.ps1's Start-Process, the real path
+// every automatic self-update relaunch takes) rather than a live user
+// double-click. Confirmed live 2026-09-23 on win10-amneziawg: launching
+// the GUI via `Start-Process spectrune.exe -ArgumentList /gui` from an
+// elevated PowerShell left the new window fully visible and drawn on top,
+// but every subsequent keystroke and click kept landing in the PowerShell
+// console that spawned it — the new window never actually became
+// foreground, it just happened to be topmost in z-order. Same
+// AttachThreadInput dance as activateExistingGUIWindow above (attach to
+// whatever process currently holds the foreground-lock right, so
+// SetForegroundWindow stops being silently ignored), just aimed at our
+// own hwnd instead of another process's.
+func forceForeground(hwnd uintptr) {
+	fg, _, _ := procGetForegroundWindow.Call()
+	if fg == 0 || fg == hwnd {
+		procSetForegroundWindow.Call(hwnd)
+		return
+	}
+	var fgPID uint32
+	fgTID, _, _ := procGetWindowThreadPID.Call(fg, uintptr(unsafe.Pointer(&fgPID)))
+	currentTID := windows.GetCurrentThreadId()
+	attached := false
+	if fgTID != 0 && uint32(fgTID) != currentTID {
+		ret, _, _ := procAttachThreadInput.Call(uintptr(currentTID), fgTID, 1)
+		attached = ret != 0
+	}
+	procShowWindow.Call(hwnd, swShow)
+	procSetForegroundWindow.Call(hwnd)
+	if attached {
+		procAttachThreadInput.Call(uintptr(currentTID), fgTID, 0)
+	}
 }
 
 const (
@@ -284,6 +324,7 @@ func runGUI(retryMutex bool) {
 
 	hwnd := uintptr(w.Window())
 	setWindowIconFromResource(hwnd)
+	forceForeground(hwnd)
 	if err := w.Bind("setTitleBarColor", func(hex string) error {
 		return setTitleBarColor(hwnd, hex)
 	}); err != nil {
