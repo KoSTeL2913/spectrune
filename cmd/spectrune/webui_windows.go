@@ -621,6 +621,23 @@ func bindAPI(w webview2.WebView) {
 		if out, err := exec.Command("schtasks", createArgs...).CombinedOutput(); err != nil {
 			return fmt.Errorf("schtasks /create: %w (%s)", err, string(out))
 		}
+		// Also fire it explicitly rather than trusting the /st trigger a
+		// couple seconds out to actually fire on its own — confirmed live
+		// 2026-09-23 (a different machine, real update from 2.0.24.0 to
+		// 2.0.26.0): the task sat there in "Ready" state with no run ever
+		// recorded, leaving the user with no GUI at all until they
+		// launched it by hand. A near-term one-shot trigger created right
+		// as the system is busy with an MSI install is exactly the kind
+		// Task Scheduler is known to silently miss — scheduleInstall
+		// (update_windows.go) already learned this the same way and
+		// always follows its own /create with an explicit /run; this path
+		// just hadn't been given the same treatment yet. /run is harmless
+		// if the trigger *does* also fire on its own — Task Scheduler
+		// simply won't start a second concurrent instance of the same
+		// task (default multiple-instances policy).
+		if out, err := exec.Command("schtasks", "/run", "/tn", "SpectruneRelaunchAfterUpdate").CombinedOutput(); err != nil {
+			log.Printf("closeForUpdate: schtasks /run failed (non-fatal, /st trigger may still fire): %v (%s)", err, out)
+		}
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 		}

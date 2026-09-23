@@ -74,7 +74,11 @@ func runGUI() {
 	w := webview.New(false)
 	defer w.Destroy()
 	w.SetTitle(guiWindowTitle)
-	w.SetSize(560, 640, webview.HintNone)
+	// Width matches the 613 floor set below via setMinSize — opening
+	// narrower than that and then immediately snapping wider once the
+	// min-size constraint kicks in was a visible jump on launch
+	// ("у меня прыгает окно", 2026-09-23).
+	w.SetSize(613, 640, webview.HintNone)
 
 	bindAPI(w)
 	startHotkeyManager()
