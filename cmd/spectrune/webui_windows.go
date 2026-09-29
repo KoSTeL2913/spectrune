@@ -27,7 +27,6 @@ import (
 
 var (
 	modkernel32             = windows.NewLazySystemDLL("kernel32.dll")
-	procGetConsoleWindow    = modkernel32.NewProc("GetConsoleWindow")
 	procRegisterAppRestart  = modkernel32.NewProc("RegisterApplicationRestart")
 	moduser32               = windows.NewLazySystemDLL("user32.dll")
 	procShowWindow          = moduser32.NewProc("ShowWindow")
@@ -202,22 +201,6 @@ type ProfileDetails struct {
 	Hotkey              string
 }
 
-// hideConsoleWindow hides this process's own console window. Spectrune
-// is built as a plain console-subsystem exe (not -H windowsgui) on
-// purpose, so the CLI subcommands in main.go (/status, /list, …) still
-// print visibly — but that means double-clicking the /gui shortcut also
-// briefly flashes/leaves up a console window behind the real UI. Hiding
-// it here, right as the GUI starts, keeps both: console output still
-// works for anyone piping/redirecting `spectrune.exe /gui`, but a
-// normal interactive launch only shows the WebView2 window.
-func hideConsoleWindow() {
-	hwnd, _, _ := procGetConsoleWindow.Call()
-	if hwnd == 0 {
-		return
-	}
-	procShowWindow.Call(hwnd, swHide)
-}
-
 // writeUIHTMLFile writes html to a stable, per-user path — the same path
 // every launch, which is what actually matters for file:// storage
 // partitioning (see the Navigate call site's comment). %LocalAppData% is
@@ -269,15 +252,6 @@ func runGUI(retryMutex bool) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	if mutexErr == windows.ERROR_ALREADY_EXISTS {
-		// Hide this second process's own console window immediately —
-		// previously only the "we won the mutex" branch below ever called
-		// hideConsoleWindow, so every *second* launch flashed a console
-		// window for its whole (brief) lifetime before exiting. Reported
-		// live 2026-09-23 as "clicking the desktop icon just blinks and
-		// does nothing" — with the real window failing to visibly come
-		// forward (see the retry below), that flash was the only visible
-		// feedback at all, easy to mistake for the click doing nothing.
-		hideConsoleWindow()
 		// A couple retries, not just one shot — activateExistingGUIWindow
 		// finds the other window by exact title via FindWindowW, and a
 		// launch that races the *other* instance's own startup (still
@@ -301,7 +275,6 @@ func runGUI(retryMutex bool) {
 		defer windows.CloseHandle(mutex)
 	}
 
-	hideConsoleWindow()
 	registerForRestart()
 
 	w := webview2.NewWithOptions(webview2.WebViewOptions{

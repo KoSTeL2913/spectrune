@@ -38,6 +38,13 @@
   ProgramData (profiles, service.log) lives outside the MSI's file
   tracking entirely, so it survives an upgrade untouched either way.
 
+  Build ../spectrune.exe as a GUI-subsystem exe first — the -H=windowsgui
+  ldflag is required, not optional (see cmd/spectrune/console_windows.go):
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags=-H=windowsgui -o spectrune.exe ./cmd/spectrune
+  Without it, Windows 11 opens a Windows Terminal window next to the GUI
+  and for every installer/service launch. `file spectrune.exe` must say
+  "(GUI)", not "(console)".
+
   MUST build with: wixl -ext ui -a x64 spectrune.wxs -o spectrune.msi
   (the ui extension flag and the x64 arch flag both matter). The x64
   arch flag is not optional. Without it, ProgramFiles64Folder

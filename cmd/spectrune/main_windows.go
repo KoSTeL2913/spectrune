@@ -52,22 +52,14 @@ func dispatch(cmd string, args []string) bool {
 			log.Fatalf("runService: %v", err)
 		}
 	case "/installservice":
-		// Hidden the same way /gui hides its own console (webui.go) — the
-		// installer's deferred custom actions (installer/spectrune.wxs)
-		// invoke this exe directly via CreateProcess, and since it's a
-		// plain console-subsystem binary, Windows allocates and flashes a
-		// new console window for it on the user's desktop for the
-		// duration of the install. There's no way to suppress that
-		// allocation from the MSI side (the exe-launch custom action type
-		// doesn't expose CREATE_NO_WINDOW), so it's hidden here instead,
-		// as early as possible.
-		hideConsoleWindow()
+		// The installer's deferred custom actions (installer/spectrune.wxs)
+		// invoke this exe directly; no console window flashes for it since
+		// the exe is GUI-subsystem (see console_windows.go).
 		if err := installService(); err != nil {
 			log.Fatalf("installService: %v", err)
 		}
 		fmt.Println("service installed and started")
 	case "/uninstallservice":
-		hideConsoleWindow()
 		if err := uninstallService(); err != nil {
 			log.Fatalf("uninstallService: %v", err)
 		}
