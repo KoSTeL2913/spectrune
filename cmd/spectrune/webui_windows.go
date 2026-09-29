@@ -276,6 +276,7 @@ func runGUI(retryMutex bool) {
 	}
 
 	registerForRestart()
+	repairAutostartEntry()
 
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     false,

@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"golang.org/x/sys/windows/registry"
@@ -55,15 +56,52 @@ func setAutostartEnabled(enable bool) error {
 		return nil
 	}
 
-	exePath, err := os.Executable()
+	cmd, err := autostartCommand()
 	if err != nil {
-		return fmt.Errorf("os.Executable: %w", err)
+		return err
 	}
-	// Quoted, no arguments — same as a normal double-click launch
-	// (runLegacyDirect's no-args path), so autostart behaves exactly like
-	// the user starting it themselves.
-	if err := k.SetStringValue(autostartValueName, `"`+exePath+`"`); err != nil {
+	if err := k.SetStringValue(autostartValueName, cmd); err != nil {
 		return fmt.Errorf("setting Run value: %w", err)
 	}
 	return nil
+}
+
+// autostartCommand is the Run value: the exe with /gui, exactly what the
+// desktop/Start Menu shortcuts run (installer/spectrune.wxs). Before
+// v2.0.41.0 it was the bare exe path with no arguments, which doesn't
+// open the GUI at all — no args is runLegacyDirect, the old AmneziaWG
+// companion mode — so autostart silently did nothing on every Windows
+// version. Reported 2026-09-29 on Windows 11.
+func autostartCommand() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("os.Executable: %w", err)
+	}
+	return `"` + exePath + `" /gui`, nil
+}
+
+// repairAutostartEntry rewrites an existing Run value that doesn't match
+// autostartCommand — i.e. one written by a pre-v2.0.41.0 build without
+// /gui — so users who already turned the toggle on get a working
+// autostart after updating, without having to toggle it off and on. A
+// missing value (toggle off) is left alone.
+func repairAutostartEntry() {
+	k, err := registry.OpenKey(registry.CURRENT_USER, autostartRunKeyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return
+	}
+	defer k.Close()
+	current, _, err := k.GetStringValue(autostartValueName)
+	if err != nil {
+		return
+	}
+	want, err := autostartCommand()
+	if err != nil || current == want {
+		return
+	}
+	if err := k.SetStringValue(autostartValueName, want); err != nil {
+		log.Printf("repairing autostart Run value: %v", err)
+		return
+	}
+	log.Printf("repaired autostart Run value: %q -> %q", current, want)
 }
