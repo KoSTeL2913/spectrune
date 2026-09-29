@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -127,10 +128,7 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 		}
 	}
 
-	included := make(map[string]bool, len(cfg.Interface.IncludedApps))
-	for _, p := range cfg.Interface.IncludedApps {
-		included[strings.ToLower(filepath.Clean(p))] = true
-	}
+	included := buildIncludedApps(cfg.Interface.IncludedApps)
 
 	resolvedDomains := resolveDomainLists(cfg.Interface.IncludedDomainLists)
 	if len(resolvedDomains) > 0 {
@@ -144,6 +142,53 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 		domains:      resolvedDomains,
 		domainIPs:    make(map[string]bool),
 	}, nil
+}
+
+// versionFolderRE matches a Squirrel.Windows-style versioned install
+// folder segment (e.g. "app-1.0.9259", used by Discord, Slack, and other
+// auto-updating Electron apps) so it can be wildcarded out of a stored
+// app path — see normalizeVersionedPath.
+var versionFolderRE = regexp.MustCompile(`^(app-)?\d+(\.\d+)+$`)
+
+// normalizeVersionedPath wildcards out any path segment that looks like
+// a Squirrel.Windows versioned folder, or "" if the path has none. Apps
+// like Discord run from inside such a folder (e.g.
+// "...\Discord\app-1.0.9259\Discord.exe") and rename it on every
+// self-update — an app-list entry pinned to the exact path at selection
+// time silently stops matching (and traffic silently falls back to
+// direct, no error surfaced) the moment the app updates itself. Reported
+// 2026-09-25: Discord included in a profile's split-tunnel stopped
+// routing through the tunnel after a Discord auto-update, confirmed via
+// service.log showing its connections going "-> direct".
+func normalizeVersionedPath(path string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+	changed := false
+	for i, part := range parts {
+		if versionFolderRE.MatchString(part) {
+			parts[i] = "*"
+			changed = true
+		}
+	}
+	if !changed {
+		return ""
+	}
+	return strings.Join(parts, string(filepath.Separator))
+}
+
+// buildIncludedApps turns a profile's raw app-path list into the lookup
+// map matches() checks, indexing each path both as-is and (if it
+// contains a versioned folder segment) under its wildcarded form — see
+// normalizeVersionedPath.
+func buildIncludedApps(apps []string) map[string]bool {
+	included := make(map[string]bool, len(apps))
+	for _, p := range apps {
+		clean := strings.ToLower(filepath.Clean(p))
+		included[clean] = true
+		if norm := normalizeVersionedPath(clean); norm != "" {
+			included[norm] = true
+		}
+	}
+	return included
 }
 
 // matches decides whether a given process's traffic should go through the
@@ -163,7 +208,14 @@ func (t *outboundTunnel) matches(exePath string) bool {
 	if exePath == "" {
 		return false
 	}
-	return t.includedApps[strings.ToLower(filepath.Clean(exePath))]
+	clean := strings.ToLower(filepath.Clean(exePath))
+	if t.includedApps[clean] {
+		return true
+	}
+	if norm := normalizeVersionedPath(clean); norm != "" {
+		return t.includedApps[norm]
+	}
+	return false
 }
 
 // updateIncludedApps swaps in a new app selection for an already-running
@@ -172,10 +224,7 @@ func (t *outboundTunnel) matches(exePath string) bool {
 // running on whichever path they started on (TCP can't migrate mid-flight
 // regardless of what this app does).
 func (t *outboundTunnel) updateIncludedApps(apps []string) {
-	included := make(map[string]bool, len(apps))
-	for _, p := range apps {
-		included[strings.ToLower(filepath.Clean(p))] = true
-	}
+	included := buildIncludedApps(apps)
 	t.mu.Lock()
 	t.includedApps = included
 	t.mu.Unlock()
