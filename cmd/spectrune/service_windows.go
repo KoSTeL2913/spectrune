@@ -31,6 +31,11 @@ type Service struct {
 	mu            sync.Mutex
 	bridge        *Bridge
 	activeProfile string
+
+	// ipv6CleanupDone is closed once the startup IPv6 firewall safety net
+	// (winService.Execute) has finished. Set once before IPC starts
+	// serving and never reassigned, so reading it needs no lock.
+	ipv6CleanupDone chan struct{}
 }
 
 type StateReply struct {
@@ -46,6 +51,11 @@ type StateReply struct {
 }
 
 func (s *Service) Connect(name string, _ *struct{}) error {
+	// Waited on before taking s.mu, so State polling isn't blocked
+	// meanwhile.
+	if s.ipv6CleanupDone != nil {
+		<-s.ipv6CleanupDone
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bridge != nil {
@@ -378,6 +388,27 @@ func (w *winService) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 		return false, 1
 	}
 
+	// Safety net for Bridge.Start's IPv6 firewall block (bridge_windows.go):
+	// a clean Disconnect/service-stop removes the rule via Stop(), but an
+	// unclean kill (crash, `Stop-Service -Force`, power loss) skips that
+	// and would otherwise leave outbound IPv6 blocked system-wide even
+	// while disconnected. It runs PowerShell, so it happens in the
+	// background AFTER reporting Running — it used to run before svc.Run
+	// even reached the SCM, and on a slow or freshly booted machine
+	// (PowerShell cold start, antivirus scanning) it blew through the
+	// SCM's 30s start timeout: the service failed to start at all (event
+	// 7009) and nothing could connect. Reproduced 2026-09-29 on a Windows
+	// 11 VM. Connect waits for it (see ipv6CleanupDone) so it can never
+	// remove the rule a fresh full-tunnel connect has just added.
+	cleanupDone := make(chan struct{})
+	w.svc.ipv6CleanupDone = cleanupDone
+	go func() {
+		defer close(cleanupDone)
+		if err := unblockIPv6Firewall(); err != nil {
+			log.Printf("startup IPv6 safety net: %v", err)
+		}
+	}()
+
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- serveIPC(listener, w.svc) }()
 
@@ -424,17 +455,6 @@ func runService() error {
 		} else {
 			log.Printf("could not open service log file %s: %v", logPath, err)
 		}
-	}
-
-	// Safety net for Bridge.Start's IPv6 firewall block (bridge.go): a
-	// clean Disconnect/service-stop removes the rule via Stop(), but an
-	// unclean kill (crash, `Stop-Service -Force`, power loss) skips that
-	// and would otherwise leave outbound IPv6 blocked system-wide even
-	// while disconnected. Unconditionally removing it on every service
-	// start is a no-op when it was never added, so it's cheap insurance.
-	if out, err := runPowerShellWithRetry(
-		fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue", ipv6FirewallRuleName)); err != nil {
-		log.Printf("startup IPv6 safety net: Remove-NetFirewallRule failed: %v (%s)", err, out)
 	}
 
 	return svc.Run(serviceName, &winService{svc: &Service{}})

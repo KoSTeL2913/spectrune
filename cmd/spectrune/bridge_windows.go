@@ -601,8 +601,16 @@ func blockIPv6Firewall() error {
 // split-tunnel disconnect (confirmed live 2026-09-14) even though nothing
 // was actually wrong — SilentlyContinue here makes "already absent" the
 // expected, silent case instead of a reported failure.
+//
+// SilentlyContinue alone turned out not to be enough: it hides the error
+// but still leaves $? false, so `powershell -Command` exits 1 whenever the
+// rule is absent — every startup and split-tunnel disconnect still
+// "failed" and ran all of runPowerShellWithRetry's retries (seen in every
+// service.log as "Remove-NetFirewallRule failed: exit status 1"). Only
+// remove a rule that actually exists, then exit 0 explicitly; a real
+// removal failure still throws (-ErrorAction Stop) and exits non-zero.
 func unblockIPv6Firewall() error {
-	script := fmt.Sprintf("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue", ipv6FirewallRuleName)
+	script := fmt.Sprintf("$r = Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue; if ($r) { $r | Remove-NetFirewallRule -ErrorAction Stop }; exit 0", ipv6FirewallRuleName)
 	out, err := runPowerShellWithRetry(script)
 	if err != nil {
 		return fmt.Errorf("Remove-NetFirewallRule: %w (%s)", err, out)
