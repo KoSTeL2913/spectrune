@@ -70,7 +70,7 @@
   reinstalled correctly.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <?define ProductCode = "37026A25-8630-40F4-B11D-981279D9AA41" ?>
+  <?define ProductCode = "6B6F9EC5-B207-4E36-9599-0DF83D5122C4" ?>
   <?define ProductVersion = "2.0.56.0" ?>
   <!--
     Name includes the version deliberately — [ProductName] is what every
@@ -145,6 +145,18 @@
       exposed to this bug; uninstall the old ProductCode first by hand
       if you hit error 2753 here again. Root-causing wixl's own
       component-costing logic for this case is unstarted follow-up.
+
+      FIX 2026-10-12 (v2.0.56.0): RemoveExistingProducts moved to
+      After="InstallInitialize" — a valid anchor (the 2762 above was the
+      default slot BEFORE InstallInitialize). Late REP only works when the
+      component Guids are shared across releases, but since v2.0.51.0
+      they're fresh every release (see the checklist at the top; now done
+      by installer/build.sh), so late REP had the old product's removal
+      delete the very spectrune.exe the new one had just installed. With
+      early REP the old product is gone before InstallFiles, the new
+      components are plainly Absent -> Local, and InstallService (which
+      needs its FileKey file to be "marked for installation", hence 2753)
+      always has a freshly installed exe.
     -->
     <Upgrade Id="19478094-F9F8-42A8-8950-08CE0458D57B">
       <UpgradeVersion Minimum="0.0.0.0" IncludeMinimum="yes"
@@ -170,8 +182,20 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Spectrune">
-          <Component Id="SpectruneExeComponent" Guid="706C4244-1F1D-4103-92A2-D7FD75C338DE" Win64="yes">
-            <File Id="SpectruneExe" Name="spectrune.exe" Source="../spectrune.exe" KeyPath="yes" />
+          <Component Id="SpectruneExeComponent" Guid="107F36DB-7C55-4E26-84AD-376181C52B30" Win64="yes">
+            <!-- DefaultVersion: wixl leaves the File table's Version column
+                 empty (it doesn't read the exe's VERSIONINFO), so MSI saw
+                 the new spectrune.exe as UNVERSIONED. Any versioned exe
+                 already at that path then wins file-versioning rules,
+                 costing logs "Disallowing installation of component ...
+                 since the same component with higher versioned keyfile
+                 exists", SpectruneExeComponent gets Action Null, and the
+                 InstallService custom action fails with 2753 — the real
+                 cause of every manual-upgrade 2753 and "old exe stayed"
+                 incident (found from a verbose log 2026-10-12). Must equal
+                 the exe's real FILEVERSION, which installer/build.sh keeps
+                 in sync with ProductVersion. -->
+            <File Id="SpectruneExe" Name="spectrune.exe" Source="../spectrune.exe" KeyPath="yes" DefaultVersion="$(var.ProductVersion)" />
             <!-- The Wintun adapter driver DLL — loaded at runtime via
                  LoadLibrary from the exe's own directory
                  (golang.zx2c4.com/wintun), so it has to ship right next
@@ -210,7 +234,7 @@
       </Directory>
 
       <Directory Id="DesktopFolder" Name="Desktop">
-        <Component Id="DesktopShortcutComponent" Guid="4539F7BC-267F-4E44-ACA4-1B5CBD45078B" Win64="yes">
+        <Component Id="DesktopShortcutComponent" Guid="C358884E-5BD3-4B3C-A80A-C4BB4F37410C" Win64="yes">
           <Shortcut Id="SpectruneDesktopShortcut"
                     Name="Spectrune"
                     Description="Per-application VPN routing"
@@ -235,7 +259,7 @@
            bare shortcut into the root Programs list. -->
       <Directory Id="ProgramMenuFolder">
         <Directory Id="SpectruneProgramMenuFolder" Name="Spectrune">
-          <Component Id="StartMenuShortcutComponent" Guid="1BB7DD5D-8835-42A8-A10C-A40F5B0DF52B" Win64="yes">
+          <Component Id="StartMenuShortcutComponent" Guid="03A33FA4-FD7A-43B2-810E-073277539991" Win64="yes">
             <Shortcut Id="SpectruneStartMenuShortcut"
                       Name="Spectrune"
                       Description="Per-application VPN routing"
@@ -303,9 +327,9 @@
       Custom action alone always resolved its hint correctly; explicit
       Sequence numbers sidestep whatever's misfiring in the two-action
       case entirely. 1801 = right after UnpublishFeatures (1800), well
-      before RemoveFiles (3500). 6502 = right after RemoveExistingProducts
-      (6501, itself right after InstallExecute's fixed 6500 slot), before
-      InstallFinalize (6600). Re-verify both numbers with
+      before RemoveFiles (3500). 6502 = after PublishProduct (6400), before
+      InstallFinalize (6600); RemoveExistingProducts now sits at 1501,
+      right after InstallInitialize (1500). Re-verify both numbers with
       `msiinfo export spectrune.msi InstallExecuteSequence` after any
       change near this block — they're only valid because nothing else in
       the standard sequence sits between UnpublishFeatures/RemoveFiles or
@@ -314,13 +338,13 @@
     <InstallExecuteSequence>
       <FindRelatedProducts After="AppSearch" />
       <Custom Action="UninstallService" Sequence="1801">REMOVE="ALL"</Custom>
-      <!-- Must run before InstallService below: the old product's own
-           uninstall (driven from here) stops+deletes a service with the
-           exact same name ("SpectruneService" never changes release to
-           release) — if InstallService ran first, this would immediately
-           delete the service the new product just registered. -->
-      <InstallExecute After="InstallFiles" />
-      <RemoveExistingProducts After="InstallExecute" />
+      <!-- Early RemoveExistingProducts (2026-10-12, v2.0.56.0): the old
+           product is fully uninstalled — its own UninstallService
+           included — before this one installs anything, i.e. the same
+           "msiexec /x old, then msiexec /i new" the self-updater does,
+           in one transaction. See the "FIX" note on the Upgrade element
+           for why the late afterInstallExecute slot had to go. -->
+      <RemoveExistingProducts After="InstallInitialize" />
       <Custom Action="InstallService" Sequence="6502">NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
