@@ -136,6 +136,10 @@ type Bridge struct {
 
 	pumpPacketCount int
 
+	// ipv6RouteAdded records whether Start added a ::/0 IPv6 default route
+	// via the Wintun adapter (full-tunnel mode only). Stop removes it when set.
+	ipv6RouteAdded bool
+
 	// conns tracks every in-flight relayed connection (both TCP and UDP,
 	// both TUNNEL and direct) so UpdateIncludedApps can force-close the
 	// ones whose path no longer matches right after an app-selection
@@ -360,6 +364,31 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 	// connection.
 	if b.outTun == nil || len(b.outTun.includedApps) == 0 {
 		log.Printf("full-tunnel/pass-through mode: blocking outbound IPv6 to prevent it bypassing the tunnel")
+
+		// Add IPv6 default route via Wintun SYNCHRONOUSLY — a plain netsh
+		// call takes milliseconds, unlike the WFP firewall block below.
+		// Without this, Windows routes global IPv6 traffic through the
+		// physical adapter (bypassing our Wintun bridge entirely) until the
+		// WFP rule fires ~10 s later. During that window a browser's IPv6
+		// TCP/TLS attempt to a DPI-blocked site (e.g. 2ip.io blocked by РКН)
+		// results in a mid-handshake RST — reported as ERR_SSL_PROTOCOL_ERROR
+		// — because the TLS ClientHello exits unencrypted through the real
+		// adapter before the VPN tunnel can carry it. Once in place, all
+		// IPv6 SYNs enter gVisor and are RST'd immediately by handleForwarded
+		// (WireGuard is IPv4-only), so Chrome's Happy Eyeballs retries on
+		// IPv4 via the tunnel instead of exposing the SNI to DPI.
+		if out, err := exec.Command("netsh", "interface", "ipv6", "add", "route",
+			"::/0", alias, "metric=1").CombinedOutput(); err != nil {
+			log.Printf("warning: could not add IPv6 default route via Wintun: %v (%s)", err, out)
+		} else {
+			log.Printf("IPv6 default route via Wintun added (adapter %s)", alias)
+			b.ipv6RouteAdded = true
+		}
+
+		// WFP firewall block is kept as belt-and-suspenders for Teredo/6to4
+		// pseudo-adapters that tunnel IPv6 inside IPv4 UDP and bypass the
+		// ::/0 route entirely (Get-NetAdapter never singles them out, so only
+		// a blanket outbound WFP rule covers them reliably).
 		// Genuinely best-effort (per the doc above) — run it in the
 		// background rather than blocking Start()/the Connect RPC on it.
 		// runPowerShellWithRetry can now take several seconds on a slow
@@ -369,12 +398,28 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 		// and nothing about the tunnel actually depends on this
 		// finishing before Connect replies.
 		go func() {
-			if err := blockIPv6Firewall(); err != nil {
+			if err := blockIPv6Firewall(b.realIfaceIndex); err != nil {
 				log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
 			} else {
 				log.Printf("outbound IPv6 blocked successfully")
 			}
 		}()
+
+		// Configure DNS on the Wintun adapter so Windows stops using the
+		// physical adapter's DNS (often a router IPv6 link-local like
+		// fe80::..., unreachable through the WireGuard tunnel) and uses a
+		// real resolver that flows through the tunnel instead. Without
+		// this, all hostname resolution fails in full-tunnel mode on
+		// machines where the router only advertises an IPv6 link-local
+		// DNS server (common on modern home routers with SLAAC).
+		var tunDNS []netip.Addr
+		if b.outTun != nil {
+			tunDNS = b.outTun.dns
+		}
+		if len(tunDNS) == 0 {
+			tunDNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
+		}
+		configureWintunDNS(alias, tunDNS)
 	}
 
 	if b.outTun != nil && len(b.outTun.includedApps) > 0 {
@@ -494,6 +539,10 @@ func (b *Bridge) Stop() {
 		deleteRouteAlias = adapterName
 	}
 	exec.Command("netsh", "interface", "ipv4", "delete", "route", "0.0.0.0/0", deleteRouteAlias).Run()
+	if b.ipv6RouteAdded {
+		exec.Command("netsh", "interface", "ipv6", "delete", "route", "::/0", deleteRouteAlias).Run()
+	}
+	resetWintunDNS(deleteRouteAlias)
 	// Best-effort cleanup, run in the background rather than blocking
 	// Stop()/the Disconnect RPC on it — same reasoning as blockIPv6Firewall's
 	// call in Start(). This one matters even more in practice: it runs on
@@ -504,7 +553,7 @@ func (b *Bridge) Stop() {
 	// process exits before this finishes, the next launch's startup
 	// safety net (service_windows.go) removes any rule left behind.
 	go func() {
-		if err := unblockIPv6Firewall(); err != nil {
+		if err := unblockIPv6Firewall(b.realIfaceIndex); err != nil {
 			log.Printf("warning: could not remove outbound IPv6 block: %v", err)
 		}
 	}()
@@ -564,53 +613,43 @@ func runPowerShellWithRetry(script string) (string, error) {
 	return string(out), err
 }
 
-// blockIPv6Firewall adds a Windows Firewall rule blocking all outbound
-// IPv6 traffic (RemoteAddress ::/0), regardless of which interface it
-// would otherwise have gone out — see the IPv6 leak guard comment at its
-// call site in Start(). Removes any stale rule of the same name first so
-// this is idempotent (harmless if called twice, e.g. after a crash left
-// one behind despite the startup safety net).
-func blockIPv6Firewall() error {
-	// -RemoteAddress '::/0' (the natural "all IPv6" CIDR) is rejected
-	// outright by New-NetFirewallRule on at least this Windows version —
-	// "One or more address prefixes are invalid" — meaning this whole
-	// rule silently never applied, every single time, since this was
-	// written; the resulting IPv6 leak guard has never actually blocked
-	// anything, all failures swallowed by Start()'s best-effort log-and-
-	// continue. Confirmed live 2026-09-13. An explicit full-range
-	// address (lowest to highest IPv6 address) is accepted instead and
-	// covers the exact same address space.
+// blockIPv6Firewall blocks all outbound IPv6 on the real outbound interface.
+// First tries a Windows Firewall rule; if that fails (HRESULT 0x80070057 or
+// similar — observed on some Win11 machines regardless of parameters), falls
+// back to disabling the ms_tcpip6 binding on that specific adapter, which
+// works unconditionally and does not depend on the Firewall rule API.
+func blockIPv6Firewall(ifaceIndex uint32) error {
 	script := fmt.Sprintf(
 		`Remove-NetFirewallRule -DisplayName '%[1]s' -ErrorAction SilentlyContinue; `+
-			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -RemoteAddress '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff' -Profile Any`,
+			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -AddressFamily IPv6 -Profile Any`,
 		ipv6FirewallRuleName,
 	)
-	out, err := runPowerShellWithRetry(script)
+	if _, err := runPowerShellWithRetry(script); err == nil {
+		return nil
+	}
+	// Firewall rule failed — disable IPv6 binding on the real adapter instead.
+	script2 := fmt.Sprintf(
+		`Get-NetAdapter | Where-Object { $_.InterfaceIndex -eq %d } | Disable-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction Stop; exit 0`,
+		ifaceIndex,
+	)
+	out, err := runPowerShellWithRetry(script2)
 	if err != nil {
-		return fmt.Errorf("New-NetFirewallRule: %w (%s)", err, out)
+		return fmt.Errorf("Disable-NetAdapterBinding: %w (%s)", err, out)
 	}
 	return nil
 }
 
-// unblockIPv6Firewall removes the rule blockIPv6Firewall added — called
-// unconditionally from Stop() regardless of which mode Start() ran in, so
-// on every split-tunnel disconnect (where blockIPv6Firewall was never
-// called in the first place, see Start()'s doc) the rule simply never
-// existed to begin with. That used to surface as a misleading
-// "could not remove outbound IPv6 block" warning on literally every
-// split-tunnel disconnect (confirmed live 2026-09-14) even though nothing
-// was actually wrong — SilentlyContinue here makes "already absent" the
-// expected, silent case instead of a reported failure.
-//
-// SilentlyContinue alone turned out not to be enough: it hides the error
-// but still leaves $? false, so `powershell -Command` exits 1 whenever the
-// rule is absent — every startup and split-tunnel disconnect still
-// "failed" and ran all of runPowerShellWithRetry's retries (seen in every
-// service.log as "Remove-NetFirewallRule failed: exit status 1"). Only
-// remove a rule that actually exists, then exit 0 explicitly; a real
-// removal failure still throws (-ErrorAction Stop) and exits non-zero.
-func unblockIPv6Firewall() error {
-	script := fmt.Sprintf("$r = Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue; if ($r) { $r | Remove-NetFirewallRule -ErrorAction Stop }; exit 0", ipv6FirewallRuleName)
+// unblockIPv6Firewall undoes whatever blockIPv6Firewall did: removes the
+// firewall rule if present, and re-enables the ms_tcpip6 binding on the
+// real adapter if it was disabled. Both cleanups are best-effort and silent
+// so this is safe to call even when only one method was used.
+func unblockIPv6Firewall(ifaceIndex uint32) error {
+	script := fmt.Sprintf(
+		`$r = Get-NetFirewallRule -DisplayName '%[1]s' -ErrorAction SilentlyContinue; if ($r) { $r | Remove-NetFirewallRule -ErrorAction Stop }; `+
+			`Get-NetAdapter | Where-Object { $_.InterfaceIndex -eq %[2]d } | Enable-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue; `+
+			`exit 0`,
+		ipv6FirewallRuleName, ifaceIndex,
+	)
 	out, err := runPowerShellWithRetry(script)
 	if err != nil {
 		return fmt.Errorf("Remove-NetFirewallRule: %w (%s)", err, out)
@@ -633,6 +672,46 @@ func configureWindowsInterface(alias string) error {
 	return nil
 }
 
+// configureWintunDNS sets the DNS servers on the Wintun adapter so that
+// Windows uses them instead of whatever the physical adapter advertised
+// (often a router's IPv6 link-local address, which is unreachable through
+// the WireGuard tunnel and causes all DNS — and therefore all HTTPS — to
+// fail in full-tunnel mode). Only called in full-tunnel mode.
+func configureWintunDNS(alias string, dns []netip.Addr) {
+	if len(dns) == 0 {
+		return
+	}
+	// Set primary; netsh replaces whatever was there.
+	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "dns",
+		"name="+alias, "static", dns[0].String(), "primary").CombinedOutput(); err != nil {
+		log.Printf("warning: set DNS primary %s: %v (%s)", dns[0], err, out)
+		return
+	}
+	for i, d := range dns[1:] {
+		exec.Command("netsh", "interface", "ipv4", "add", "dns",
+			"name="+alias, d.String(), fmt.Sprintf("index=%d", i+2)).Run()
+	}
+	log.Printf("full-tunnel DNS configured on adapter %s: %v", alias, dns)
+}
+
+// resetWintunDNS restores DHCP-assigned DNS on the Wintun adapter.
+func resetWintunDNS(alias string) {
+	exec.Command("netsh", "interface", "ipv4", "set", "dns", "name="+alias, "dhcp").Run()
+}
+
+// removeIPv6FirewallRule removes the SpectruneBlockIPv6 firewall rule if it
+// exists — used by the startup safety net in service_windows.go, which runs
+// before a real connect so no ifaceIndex is available. Does not touch adapter
+// bindings (those are restored by unblockIPv6Firewall on a normal disconnect).
+func removeIPv6FirewallRule() error {
+	script := fmt.Sprintf("$r = Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue; if ($r) { $r | Remove-NetFirewallRule -ErrorAction Stop }; exit 0", ipv6FirewallRuleName)
+	out, err := runPowerShellWithRetry(script)
+	if err != nil {
+		return fmt.Errorf("Remove-NetFirewallRule: %w (%s)", err, out)
+	}
+	return nil
+}
+
 // handleForwarded/handleUDPForwarded both special-case pid == os.Getpid()
 // — this daemon process's *own* outbound traffic (the update checker's
 // GitHub API calls, in particular) always goes direct, never through
@@ -647,6 +726,18 @@ func configureWindowsInterface(alias string) error {
 // depend on itself to fetch its own fix.
 func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	id := r.ID()
+	// WireGuard tunnel is IPv4-only. If we accept an IPv6 SYN (which gVisor
+	// does because the NIC is in promiscuous+spoofing mode), we complete the
+	// three-way handshake and then fail the relay — the browser has already
+	// committed to the IPv6 path and sees a reset mid-TLS handshake, which
+	// Chrome reports as ERR_SSL_PROTOCOL_ERROR rather than a connection
+	// error. Refuse immediately instead: Chrome's Happy Eyeballs then falls
+	// back to IPv4 without delay. This also covers the ~10s window between
+	// Bridge.Start and blockIPv6Firewall finishing in the background.
+	if id.LocalAddress.Len() != 4 {
+		r.Complete(true) // RST
+		return
+	}
 	appAddr := net.JoinHostPort(id.RemoteAddress.String(), portStr(id.RemotePort))
 	dstAddr := net.JoinHostPort(id.LocalAddress.String(), portStr(id.LocalPort))
 
@@ -682,6 +773,11 @@ const udpIdleTimeout = 30 * time.Second
 
 func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 	id := r.ID()
+	// IPv6 UDP is silently dropped — same reasoning as handleForwarded's
+	// IPv6 RST: the WireGuard tunnel is IPv4-only and relay would fail.
+	if id.LocalAddress.Len() != 4 {
+		return
+	}
 	appAddr := net.JoinHostPort(id.RemoteAddress.String(), portStr(id.RemotePort))
 	dstAddr := net.JoinHostPort(id.LocalAddress.String(), portStr(id.LocalPort))
 

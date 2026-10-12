@@ -25,34 +25,6 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// powershellFileArg returns a "powershell.exe ... -File <path>" invocation
-// for a script already written to scriptPath, suitable for embedding as a
-// single schtasks /tr value — deliberately with NO quotes around the path,
-// which is what actually matters here: every script this project schedules
-// lives under updateStateDir() (%ProgramData%\Spectrune, guaranteed
-// space-free), so quoting it was never actually necessary, only ever
-// reflexive.
-//
-// This went through two broken iterations before landing here, both
-// confirmed live on win10-amneziawg 2026-09-23 in the same test session.
-// First: -File "<path>" (quoted out of habit). A quoted value nested
-// inside the already-quoted /tr argument gets re-parsed at several layers
-// (Go string -> one argv element for schtasks -> schtasks' own /tr parsing
-// -> the actual command line the task runs -> PowerShell's own argv) and
-// broke somewhere in there — a PowerShell window flashed and closed
-// instantly, the script never actually running. Second: swapping to
-// -EncodedCommand (a Base64 UTF-16LE blob) to sidestep quoting entirely —
-// which it did, but the resulting /tr value ran well past a real, still-
-// enforced legacy limit in schtasks.exe's own command-line parser
-// (observed failure: "длина ... 261" — length ~261 — in the Russian-
-// locale error text), so `schtasks /create` itself failed outright rather
-// than silently mis-behaving. Dropping the quotes on an already
-// space-free path sidesteps *both*: nothing left to mis-parse, and the
-// command line is short again.
-func powershellFileArg(scriptPath string) string {
-	return fmt.Sprintf(`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File %s`, scriptPath)
-}
-
 // latestReleaseURL points at this project's own public GitHub repo — see
 // https://github.com/KoSTeL2913/spectrune/releases. Public repo, so the
 // GitHub API needs no auth token here (would otherwise mean embedding a
@@ -224,9 +196,29 @@ func currentSpectruneProductCode() string {
 	return ""
 }
 
-// installRelease downloads release's .msi asset and schedules it to be
-// installed silently. Best-effort: every failure just logs and returns,
-// matching the fully-silent auto-check path this is shared with.
+// installTriggered is set by TriggerInstall (called by the GUI's closeForUpdate)
+// to prevent the headless fallback goroutine from double-scheduling the install.
+var installTriggered atomic.Bool
+
+// installRelease downloads release's .msi asset and waits for the GUI to
+// call Bridge.TriggerInstall before running msiexec. Best-effort: every
+// failure just logs and returns.
+//
+// The install is intentionally NOT scheduled here — scheduling it here
+// (before the GUI closes) means the bat stops the service before the GUI can
+// react, the GUI gets an IPC connection error on its next updateInProgress
+// poll, treats that as "not updating", stays open, and keeps spectrune.exe
+// locked so msiexec /i can never replace the file.
+//
+// Instead: installRelease signals updateInProgress=true, the GUI's
+// checkBackgroundUpdate poll sees it and calls closeForUpdate, which calls
+// Bridge.TriggerInstall to schedule the bat. The bat starts with only a
+// short initial wait (5s) — the GUI is already closing at that point, so
+// the file lock is released well before msiexec runs.
+//
+// For the headless case (no GUI open), a 30-second fallback goroutine
+// schedules the install directly after waiting long enough to confirm the
+// GUI hasn't responded.
 func installRelease(release *ghRelease) {
 	var msiURL string
 	for _, a := range release.Assets {
@@ -249,40 +241,92 @@ func installRelease(release *ghRelease) {
 		return
 	}
 
-	if err := scheduleInstall(release.TagName, path); err != nil {
-		log.Printf("update check: scheduling install failed: %v", err)
-		updateInProgress.Store(false)
-		return
-	}
-	// Deliberately no updateInProgress.Store(false) on the success path
-	// — the scheduled task below stops SpectruneService partway through
-	// (see scheduleInstall's own doc), which is this very process, so
-	// nothing after that point ever runs anyway. A fresh process/service
-	// instance starts back at updateInProgress's zero value (false)
-	// regardless, once the new release is up.
+	// Record the pending version alongside the MSI so tryRecoverPendingUpdate
+	// (called at next service start) can decide whether to retry without
+	// re-downloading — useful if the install below fails silently and the
+	// service is restarted before the next update-check throttle window.
+	stateDir, _ := updateStateDir()
+	_ = os.WriteFile(filepath.Join(stateDir, "update-pending-tag"),
+		[]byte(release.TagName), 0o600)
+
+	// Reset the trigger flag so the fallback goroutine can tell whether
+	// the GUI called TriggerInstall within the grace window.
+	installTriggered.Store(false)
+
+	// Headless fallback: if no GUI calls TriggerInstall within 30 seconds,
+	// the GUI is not open and we can proceed directly (taskkill handles any
+	// stray spectrune.exe process).
+	go func() {
+		time.Sleep(30 * time.Second)
+		if installTriggered.Swap(true) {
+			return // GUI already triggered via TriggerInstall
+		}
+		log.Printf("update check: GUI did not trigger install within 30s, proceeding headlessly")
+		if err := scheduleInstall(release.TagName, path, 5); err != nil {
+			log.Printf("update check: headless install failed: %v", err)
+			updateInProgress.Store(false)
+			return
+		}
+		go func() {
+			time.Sleep(90 * time.Second)
+			if updateInProgress.Swap(false) {
+				log.Printf("update check: headless install did not restart service within 90s — likely failed, clearing flag")
+			}
+		}()
+	}()
+
+	// Watchdog: if the install task fails silently and the service is still
+	// alive 90s later, clear updateInProgress so the next check can retry.
+	go func() {
+		time.Sleep(90 * time.Second)
+		if updateInProgress.Swap(false) {
+			log.Printf("update check: install process did not restart service within 90s — likely failed, clearing update flag")
+		}
+	}()
 }
 
-// scheduleInstall writes a small script that uninstalls whatever
-// Spectrune release is currently registered (via currentSpectruneProductCode
-// — see its own doc for why that's needed at all) and then installs
-// msiPath, and runs that script via a detached, one-shot SYSTEM Scheduled
-// Task rather than running both msiexec calls inline here.
+// TriggerInstall is called by the GUI's closeForUpdate just before it closes
+// the window. At this point the GUI is about to exit (releasing spectrune.exe's
+// file lock), so we schedule the install bat with only a short initial wait.
+func (s *Service) TriggerInstall(_ struct{}, _ *struct{}) error {
+	stateDir, err := updateStateDir()
+	if err != nil {
+		return err
+	}
+	msiPath := filepath.Join(stateDir, "update.msi")
+	tagBytes, err := os.ReadFile(filepath.Join(stateDir, "update-pending-tag"))
+	if err != nil {
+		return fmt.Errorf("no pending update tag: %w", err)
+	}
+	return scheduleInstall(strings.TrimSpace(string(tagBytes)), msiPath, 5)
+}
+
+// scheduleInstall writes a small .bat that uninstalls whatever Spectrune
+// release is currently registered (via currentSpectruneProductCode — see
+// its own doc for why that's needed at all) and then installs msiPath,
+// and runs it via a one-shot SYSTEM Scheduled Task.
 //
-// Can't just be two sequential exec.Command calls in this same goroutine:
-// the `/x` step stops SpectruneService, which IS the process running this
-// code — same class of problem webui_windows.go's closeForUpdate already
-// solved for the GUI side with its own Scheduled Task relaunch. Confirmed
-// live 2026-09-17 on a clean VM: an inline `/x` call completed
-// successfully (verified via the log and the registry) but the
-// process — and the goroutine that was supposed to run the follow-up
-// `/i` — died right along with the service it had just uninstalled, so
-// the machine was left with no Spectrune install at all until manually
-// reinstalled. A Scheduled Task's own process is independent of the
-// caller's lifetime, so it survives; SYSTEM as the run-as account avoids
-// any Session-0/interactive-logon requirement (unlike closeForUpdate's
-// GUI-side task, which does need a real logged-on session and so runs as
-// that user instead).
-func scheduleInstall(tag, msiPath string) error {
+// Can't run the msiexec calls inline in this goroutine: the /x step stops
+// SpectruneService, which IS the process running this code. A detached
+// child process (DETACHED_PROCESS flag) doesn't help either — Windows
+// Services run inside a Job Object, and child processes inherit it; when
+// the service process exits, the Job Object closes and all children are
+// killed before /i can run. Confirmed live 2026-09-30: every detached
+// cmd.exe attempt left the registry updated but the exe unreplaced,
+// because msiexec /x killed the service (and cmd.exe along with it via
+// the job) before msiexec /i had a chance to copy the new file.
+// A Scheduled Task runs under Task Scheduler's own process — entirely
+// outside the service's Job Object — and survives the service exit.
+//
+// Uses .bat + cmd.exe (not .ps1 + powershell.exe) so the task succeeds
+// regardless of the machine's PowerShell execution policy; the /tr
+// argument stays short (≪261 chars) so schtasks accepts it.
+// scheduleInstall writes a bat + runs it as a SYSTEM scheduled task.
+// initialWaitSec controls how long the bat waits before stopping the service:
+//   - 5 when called from TriggerInstall (GUI is already closing, 5s is enough)
+//   - 5 when called from the headless fallback (no GUI, taskkill cleans up)
+//   - 3 when called from tryRecoverPendingUpdate (service just started, no GUI)
+func scheduleInstall(tag, msiPath string, initialWaitSec int) error {
 	stateDir, err := updateStateDir()
 	if err != nil {
 		return err
@@ -292,21 +336,42 @@ func scheduleInstall(tag, msiPath string) error {
 	}
 
 	const taskName = "SpectruneSelfUpdateInstall"
+	tagFile := filepath.Join(stateDir, "update-pending-tag")
+	batPath := filepath.Join(stateDir, "self-update-install.bat")
+
 	var b strings.Builder
-	if oldCode := currentSpectruneProductCode(); oldCode != "" {
-		fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/x','%s','/qn','/norestart' -Wait\r\n", oldCode)
+	// Short wait so the GUI finishes its DestroyWindow call (and releases
+	// spectrune.exe's file lock) before we stop the service and run msiexec.
+	// When called from TriggerInstall the GUI is already mid-close (1.5s
+	// delay before DestroyWindow), so 5s is more than enough.
+	if initialWaitSec > 0 {
+		fmt.Fprintf(&b, "timeout /t %d /nobreak >nul 2>&1\r\n", initialWaitSec)
 	}
-	fmt.Fprintf(&b, "Start-Process msiexec.exe -ArgumentList '/i','%s','/qn','/norestart' -Wait\r\n", msiPath)
-	fmt.Fprintf(&b, "schtasks.exe /delete /tn '%s' /f\r\n", taskName)
-	scriptPath := filepath.Join(stateDir, "self-update-install.ps1")
-	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o600); err != nil {
+	// Disable and stop the service so Windows SCM's auto-restart recovery
+	// can't re-lock spectrune.exe before /i copies the new binary.
+	b.WriteString("sc.exe config SpectruneService start= disabled\r\n")
+	b.WriteString("sc.exe stop SpectruneService\r\n")
+	b.WriteString("timeout /t 8 /nobreak >nul 2>&1\r\n")
+	// Kill any remaining spectrune.exe (GUI or lingering service instance)
+	// so msiexec can overwrite the file. Non-fatal if nothing is running.
+	b.WriteString("taskkill /f /im spectrune.exe >nul 2>&1\r\n")
+	b.WriteString("timeout /t 2 /nobreak >nul 2>&1\r\n")
+	if oldCode := currentSpectruneProductCode(); oldCode != "" {
+		fmt.Fprintf(&b, "msiexec.exe /x %s /qn /norestart\r\n", oldCode)
+	}
+	fmt.Fprintf(&b, "msiexec.exe /i \"%s\" /qn /norestart\r\n", msiPath)
+	fmt.Fprintf(&b, "schtasks.exe /delete /tn \"%s\" /f\r\n", taskName)
+	fmt.Fprintf(&b, "del /f /q \"%s\"\r\n", msiPath)
+	fmt.Fprintf(&b, "del /f /q \"%s\"\r\n", tagFile)
+	fmt.Fprintf(&b, "del /f /q \"%s\"\r\n", batPath)
+	if err := os.WriteFile(batPath, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
 
 	triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 	createArgs := []string{
 		"/create", "/tn", taskName,
-		"/tr", powershellFileArg(scriptPath),
+		"/tr", fmt.Sprintf(`cmd.exe /c "%s"`, batPath),
 		"/sc", "once", "/st", triggerTime,
 		"/ru", "SYSTEM", "/f",
 	}
@@ -318,6 +383,41 @@ func scheduleInstall(tag, msiPath string) error {
 	}
 	log.Printf("update check: %s install task scheduled and started", tag)
 	return nil
+}
+
+// tryRecoverPendingUpdate runs at service startup and checks whether a
+// previous update attempt left a downloaded MSI on disk but never
+// installed it (e.g. because msiexec exited non-zero or the service was
+// killed mid-install). If a newer MSI is found, it launches the same
+// detached cmd.exe install path used by scheduleInstall.
+func tryRecoverPendingUpdate() {
+	stateDir, err := updateStateDir()
+	if err != nil {
+		return
+	}
+	msiPath := filepath.Join(stateDir, "update.msi")
+	tagFile := filepath.Join(stateDir, "update-pending-tag")
+
+	tagBytes, err := os.ReadFile(tagFile)
+	if err != nil {
+		return // no pending tag → nothing to recover
+	}
+	tag := strings.TrimSpace(string(tagBytes))
+	if !isNewerVersion(appVersion, tag) {
+		// Already at or past this version; clean up stale files.
+		os.Remove(msiPath)
+		os.Remove(tagFile)
+		return
+	}
+	if _, err := os.Stat(msiPath); os.IsNotExist(err) {
+		os.Remove(tagFile) // tag with no MSI → stale
+		return
+	}
+
+	log.Printf("startup: found pending update %s (running %s), attempting recovery install", tag, appVersion)
+	if err := scheduleInstall(tag, msiPath, 3); err != nil {
+		log.Printf("startup: recovery install failed: %v", err)
+	}
 }
 
 // updateStateDir mirrors runService's own placement of service.log — one

@@ -1,3 +1,6 @@
 /spectrune.exe
 /installer/spectrune.msi
 /spectrune-linux
+/dist/
+/installer/spectrune.exe
+/installer/spectrune-*.msi

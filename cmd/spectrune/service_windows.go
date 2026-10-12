@@ -404,7 +404,7 @@ func (w *winService) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 	w.svc.ipv6CleanupDone = cleanupDone
 	go func() {
 		defer close(cleanupDone)
-		if err := unblockIPv6Firewall(); err != nil {
+		if err := removeIPv6FirewallRule(); err != nil {
 			log.Printf("startup IPv6 safety net: %v", err)
 		}
 	}()
@@ -414,7 +414,19 @@ func (w *winService) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 
 	changes <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 	log.Printf("%s running, control pipe %s", serviceName, pipePath)
+	go tryRecoverPendingUpdate()
 	go w.svc.autoConnectOnStartup()
+	// Background update check: runs once at startup (after a short delay so
+	// the service settles) and then every hour, independently of whether the
+	// GUI is open. This means updates install on machines that run headlessly
+	// or whose users never open the GUI themselves.
+	go func() {
+		time.Sleep(2 * time.Minute)
+		for {
+			w.svc.CheckAndInstallUpdate(struct{}{}, new(struct{})) //nolint:errcheck
+			time.Sleep(updateCheckThrottle)
+		}
+	}()
 
 loop:
 	for {

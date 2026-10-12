@@ -29,6 +29,7 @@ import (
 type outboundTunnel struct {
 	dev *device.Device
 	net *netstack.Net
+	dns []netip.Addr // DNS servers from the WireGuard config (or [1.1.1.1])
 
 	// includedApps is read on every intercepted connection (matches) and
 	// can be rewritten live while connected (updateIncludedApps, driven by
@@ -138,6 +139,7 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 	return &outboundTunnel{
 		dev:          dev,
 		net:          tnet,
+		dns:          dns,
 		includedApps: included,
 		domains:      resolvedDomains,
 		domainIPs:    make(map[string]bool),

@@ -694,6 +694,18 @@ func bindAPI(w webview2.WebView) {
 			if err := os.MkdirAll(stateDir, 0o755); err != nil {
 				return err
 			}
+			// Tell the service to schedule the install bat NOW — the GUI is
+			// about to close (DestroyWindow fires after delayMs), so
+			// spectrune.exe's file lock will be gone well within the bat's
+			// 5-second initial wait. This is the key ordering guarantee:
+			// the install is triggered only after closeForUpdate is called,
+			// which means the GUI is already shutting down when the bat
+			// starts, not still alive and locking the exe.
+			if client, dialErr := ipcDial(); dialErr == nil {
+				_ = client.Call("Bridge.TriggerInstall", struct{}{}, new(struct{}))
+				client.Close()
+			}
+
 			// $seen guards against the install task not existing *yet* —
 			// updateInProgress flips true (which is what triggers this
 			// whole closeForUpdate call) right as installRelease starts,
@@ -703,29 +715,40 @@ func bindAPI(w webview2.WebView) {
 			// actually been observed running at least once first;
 			// otherwise it just means "hasn't started yet" and this loop
 			// keeps waiting instead of firing immediately.
+			//
+			// VBScript + wscript.exe instead of PowerShell: wscript.exe
+			// is a GUI-subsystem binary so it never opens a console window,
+			// even when the task runs with /it in the user's session.
+			// PowerShell (even with -WindowStyle Hidden) briefly flashes a
+			// console before the hide takes effect.
 			script := fmt.Sprintf(
-				"$exe = '%s'\r\n"+
-					"$seen = $false\r\n"+
-					"for ($i = 0; $i -lt 40; $i++) {\r\n"+
-					"    Start-Sleep -Seconds 2\r\n"+
-					"    schtasks /query /tn 'SpectruneSelfUpdateInstall' 2>$null 1>$null\r\n"+
-					"    if ($LASTEXITCODE -eq 0) { $seen = $true }\r\n"+
-					"    elseif ($seen) { break }\r\n"+
-					"}\r\n"+
-					"Start-Process -FilePath $exe -ArgumentList '/gui-restart'\r\n",
+				"Dim WshShell\r\n"+
+					"Set WshShell = WScript.CreateObject(\"WScript.Shell\")\r\n"+
+					"Dim exePath : exePath = \"%s\"\r\n"+
+					"Dim seen : seen = False\r\n"+
+					"Dim i\r\n"+
+					"Dim rc\r\n"+
+					"For i = 1 To 40\r\n"+
+					"    WScript.Sleep 2000\r\n"+
+					"    rc = WshShell.Run(\"schtasks.exe /query /tn SpectruneSelfUpdateInstall\", 0, True)\r\n"+
+					"    If rc = 0 Then\r\n"+
+					"        seen = True\r\n"+
+					"    ElseIf seen Then\r\n"+
+					"        Exit For\r\n"+
+					"    End If\r\n"+
+					"Next\r\n"+
+					"WshShell.Run Chr(34) & exePath & Chr(34) & \" /gui-restart\", 0, False\r\n",
 				exePath,
 			)
-			// See powershellFileArg's doc for why this is an unquoted
-			// -File <path> rather than -File "<path>" or -EncodedCommand —
-			// both tried and broken in this same test session 2026-09-23.
-			scriptPath := filepath.Join(stateDir, "relaunch-wait.ps1")
+			// wscript.exe path is guaranteed space-free (ProgramData\Spectrune).
+			scriptPath := filepath.Join(stateDir, "relaunch-wait.vbs")
 			if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
 				return err
 			}
 			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 			createArgs = []string{
 				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-				"/tr", powershellFileArg(scriptPath),
+				"/tr", fmt.Sprintf("wscript.exe //nologo //B %s", scriptPath),
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		}
