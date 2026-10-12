@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -196,9 +197,41 @@ func currentSpectruneProductCode() string {
 	return ""
 }
 
-// installTriggered is set by TriggerInstall (called by the GUI's closeForUpdate)
-// to prevent the headless fallback goroutine from double-scheduling the install.
-var installTriggered atomic.Bool
+// pendingInstall coordinates the three ways a downloaded update gets
+// installed — TriggerInstall from the GUI/update splash, the headless 30s
+// fallback, and (separately, on service start) tryRecoverPendingUpdate —
+// so the install bat is scheduled exactly once, and only once the MSI is
+// fully downloaded. Until v2.0.56.0 TriggerInstall usually arrived while
+// the download was still running, failed on the missing tag file, and the
+// install only happened via the 30s fallback; when a stale tag file from
+// an earlier attempt WAS present, it could schedule a half-downloaded MSI.
+var pendingInstall struct {
+	sync.Mutex
+	tag, msiPath string
+	ready        bool // MSI downloaded and tag recorded
+	requested    bool // TriggerInstall called — install as soon as ready
+	requestedAt  time.Time
+	scheduled    bool // install bat scheduled; never schedule twice
+}
+
+// scheduleIfRequested schedules the pending install if it's downloaded
+// and either requested (by TriggerInstall) or forced (headless fallback).
+// Returns whether this call scheduled it.
+func scheduleIfRequested(force bool) bool {
+	pendingInstall.Lock()
+	if !pendingInstall.ready || pendingInstall.scheduled || !(pendingInstall.requested || force) {
+		pendingInstall.Unlock()
+		return false
+	}
+	pendingInstall.scheduled = true
+	tag, msiPath := pendingInstall.tag, pendingInstall.msiPath
+	pendingInstall.Unlock()
+	if err := scheduleInstall(tag, msiPath, 2); err != nil {
+		log.Printf("update check: scheduling install failed: %v", err)
+		updateInProgress.Store(false)
+	}
+	return true
+}
 
 // installRelease downloads release's .msi asset and waits for the GUI to
 // call Bridge.TriggerInstall before running msiexec. Best-effort: every
@@ -233,6 +266,14 @@ func installRelease(release *ghRelease) {
 	}
 
 	log.Printf("update check: %s available (running %s), downloading", release.TagName, appVersion)
+	pendingInstall.Lock()
+	pendingInstall.tag, pendingInstall.msiPath = "", ""
+	pendingInstall.ready, pendingInstall.scheduled = false, false
+	// The update splash calls TriggerInstall right after CheckForUpdateNow
+	// returns, which can beat this goroutine here — keep a request that
+	// fresh, but never a stale one from some earlier, unrelated update.
+	pendingInstall.requested = pendingInstall.requested && time.Since(pendingInstall.requestedAt) < time.Minute
+	pendingInstall.Unlock()
 	updateInProgress.Store(true)
 	path, err := downloadUpdate(msiURL)
 	if err != nil {
@@ -249,24 +290,22 @@ func installRelease(release *ghRelease) {
 	_ = os.WriteFile(filepath.Join(stateDir, "update-pending-tag"),
 		[]byte(release.TagName), 0o600)
 
-	// Reset the trigger flag so the fallback goroutine can tell whether
-	// the GUI called TriggerInstall within the grace window.
-	installTriggered.Store(false)
+	pendingInstall.Lock()
+	pendingInstall.tag, pendingInstall.msiPath, pendingInstall.ready = release.TagName, path, true
+	pendingInstall.Unlock()
+	if scheduleIfRequested(false) {
+		log.Printf("update check: install was already requested, scheduled right after download")
+	}
 
 	// Headless fallback: if no GUI calls TriggerInstall within 30 seconds,
 	// the GUI is not open and we can proceed directly (taskkill handles any
 	// stray spectrune.exe process).
 	go func() {
 		time.Sleep(30 * time.Second)
-		if installTriggered.Swap(true) {
-			return // GUI already triggered via TriggerInstall
+		if !scheduleIfRequested(true) {
+			return // already scheduled via TriggerInstall
 		}
-		log.Printf("update check: GUI did not trigger install within 30s, proceeding headlessly")
-		if err := scheduleInstall(release.TagName, path, 5); err != nil {
-			log.Printf("update check: headless install failed: %v", err)
-			updateInProgress.Store(false)
-			return
-		}
+		log.Printf("update check: GUI did not trigger install within 30s, proceeded headlessly")
 		go func() {
 			time.Sleep(90 * time.Second)
 			if updateInProgress.Swap(false) {
@@ -288,17 +327,14 @@ func installRelease(release *ghRelease) {
 // TriggerInstall is called by the GUI's closeForUpdate just before it closes
 // the window. At this point the GUI is about to exit (releasing spectrune.exe's
 // file lock), so we schedule the install bat with only a short initial wait.
+// If the MSI is still downloading, the request is remembered and
+// installRelease schedules the install the moment the download finishes.
 func (s *Service) TriggerInstall(_ struct{}, _ *struct{}) error {
-	stateDir, err := updateStateDir()
-	if err != nil {
-		return err
-	}
-	msiPath := filepath.Join(stateDir, "update.msi")
-	tagBytes, err := os.ReadFile(filepath.Join(stateDir, "update-pending-tag"))
-	if err != nil {
-		return fmt.Errorf("no pending update tag: %w", err)
-	}
-	return scheduleInstall(strings.TrimSpace(string(tagBytes)), msiPath, 5)
+	pendingInstall.Lock()
+	pendingInstall.requested, pendingInstall.requestedAt = true, time.Now()
+	pendingInstall.Unlock()
+	scheduleIfRequested(false)
+	return nil
 }
 
 // scheduleInstall writes a small .bat that uninstalls whatever Spectrune

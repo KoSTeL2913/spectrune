@@ -124,6 +124,10 @@ func dispatch(cmd string, args []string) bool {
 		// acquiring it briefly instead of immediately treating
 		// ERROR_ALREADY_EXISTS as "another real instance is running."
 		runGUI(true)
+	case "/update-splash":
+		// Run by closeForUpdate from a temp copy of the exe — see
+		// updatesplash_windows.go.
+		runUpdateSplash()
 	default:
 		return false
 	}

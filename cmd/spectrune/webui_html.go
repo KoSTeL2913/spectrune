@@ -580,6 +580,9 @@ var I18N = {
     updateChecking: 'Checking…', updateUpToDate: 'Up to date (%s)',
     updateAvailable: 'Updating to %s…', updateCheckFailed: 'Update check failed: %s',
     updateInstallingOverlay: 'Installing an update. Spectrune will restart automatically…',
+    updateSplashTitle: 'Spectrune — updating', updateSplashChecking: 'Checking for updates…',
+    updateSplashInstalling: 'Installing update %s…', updateSplashUpToDate: "You're on the latest version (%s)",
+    updateSplashFailed: "Couldn't check for updates: %s",
     themeMode: 'Mode', themeDark: 'Dark', themeLight: 'Light', themeAccent: 'Accent color',
     autoConnect: 'Connect automatically on startup',
     presetLoad: 'Load', presetSaveAs: 'Save as…', presetDelete: 'Delete',
@@ -632,6 +635,9 @@ var I18N = {
     updateChecking: 'Проверка…', updateUpToDate: 'Актуальная версия (%s)',
     updateAvailable: 'Обновление до %s…', updateCheckFailed: 'Ошибка проверки: %s',
     updateInstallingOverlay: 'Устанавливается обновление. Spectrune перезапустится автоматически…',
+    updateSplashTitle: 'Spectrune — обновление', updateSplashChecking: 'Проверка обновлений…',
+    updateSplashInstalling: 'Устанавливается обновление %s…', updateSplashUpToDate: 'У вас последняя версия (%s)',
+    updateSplashFailed: 'Не удалось проверить обновления: %s',
     themeMode: 'Режим', themeDark: 'Тёмная', themeLight: 'Светлая', themeAccent: 'Акцентный цвет',
     autoConnect: 'Автоподключение при запуске',
     presetLoad: 'Загрузить', presetSaveAs: 'Сохранить как…', presetDelete: 'Удалить',
@@ -2068,10 +2074,25 @@ function triggerCloseForUpdate(showOverlayFirst) {
   // through as alreadyDone so the Go side can relaunch immediately via
   // the plain, always-supported /gui rather than a poll-and-wait watcher.
   if (showOverlayFirst) $('update-installing-overlay').style.display = 'flex';
-  closeForUpdate(showOverlayFirst ? 1500 : 0, !showOverlayFirst).catch(function() {
+  // Windows only: style the update splash (updatesplash_windows.go) that
+  // stays on screen for the rest of the install, to match this window.
+  var styled = showOverlayFirst ? styleUpdateSplash() : Promise.resolve();
+  styled.then(function() {
+    return closeForUpdate(showOverlayFirst ? 1500 : 0, !showOverlayFirst);
+  }).catch(function() {
     $('update-installing-overlay').style.display = 'none';
     backgroundUpdateHandled = false;
   });
+}
+// styleUpdateSplash passes this window's language and theme to the
+// Windows update window (updatesplash_windows.go); no-op elsewhere.
+function styleUpdateSplash() {
+  if (!window.setUpdateSplashStyle) return Promise.resolve();
+  var cs = getComputedStyle(document.documentElement);
+  return window.setUpdateSplashStyle(t('updateSplashTitle'), t('updateSplashChecking'),
+    t('updateSplashInstalling'), t('updateSplashUpToDate'), t('updateSplashFailed'),
+    document.documentElement.classList.contains('light'),
+    cs.getPropertyValue('--grad').trim()).catch(function() {});
 }
 function checkBackgroundUpdate() {
   if (backgroundUpdateHandled) return;
@@ -2102,6 +2123,20 @@ function checkBackgroundUpdate() {
 }
 $('btn-check-update').onclick = function() {
   $('btn-check-update').disabled = true;
+  // Windows: hand the whole check (and install, if any) to the update
+  // window, which reopens Spectrune when it's done. Falls back to the
+  // in-window check below if it can't start.
+  if (window.startUpdateCheck) {
+    backgroundUpdateHandled = true; // this window is closing either way
+    styleUpdateSplash().then(function() { return startUpdateCheck(); }).catch(function() {
+      backgroundUpdateHandled = false;
+      checkUpdateInWindow();
+    });
+    return;
+  }
+  checkUpdateInWindow();
+};
+function checkUpdateInWindow() {
   $('update-status-text').textContent = t('updateChecking');
   checkForUpdateNow().then(function(reply) {
     if (reply.Available) {
@@ -2118,7 +2153,7 @@ $('btn-check-update').onclick = function() {
     $('update-status-text').textContent = tf('updateCheckFailed', String(err));
     $('btn-check-update').disabled = false;
   });
-};
+}
 $('theme-mode-dark').onclick = function() { setThemeMode('dark'); };
 $('theme-mode-light').onclick = function() { setThemeMode('light'); };
 $('theme-custom-color1').oninput = setThemeCustomColors;
@@ -2248,6 +2283,14 @@ refreshProfiles();
 refreshStatus();
 setInterval(refreshStatus, 3000);
 setInterval(checkBackgroundUpdate, 3000);
+// Windows: tell the update window (updatesplash_windows.go) this page has
+// loaded, so it can step aside without exposing a blank window.
+// Not requestAnimationFrame: the window starts off screen (runGUI), where
+// Chromium may treat it as occluded and never run animation frames.
+if (window.uiReady) {
+  if (document.readyState === 'complete') setTimeout(uiReady, 50);
+  else window.addEventListener('load', function() { setTimeout(uiReady, 50); });
+}
 </script>
 </body>
 </html>`

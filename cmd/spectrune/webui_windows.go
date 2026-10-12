@@ -13,9 +13,9 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -66,6 +66,9 @@ func registerForRestart() {
 // handler uses, but bindAPI(w) (which defines that binding) runs before
 // the window/hwnd exists yet, so it can't just close over a local.
 var currentHwnd uintptr
+
+// revealMainWindowOnce is set by runGUI; see uiReady.
+var revealMainWindowOnce = func() {}
 
 // guiWindowTitle must match WindowOptions.Title below exactly — it's how
 // a second /gui launch finds the already-running window to activate (see
@@ -278,14 +281,15 @@ func runGUI(retryMutex bool) {
 	registerForRestart()
 	repairAutostartEntry()
 
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
+	// Created off screen and centered once the page has painted (uiReady
+	// below), so the window never shows as a blank white box first.
+	w, _ := newOffscreenWebview(webview2.WebViewOptions{
 		Debug:     false,
 		AutoFocus: true,
 		WindowOptions: webview2.WindowOptions{
 			Title:  guiWindowTitle,
 			Width:  560,
 			Height: 640,
-			Center: true,
 		},
 	})
 	if w == nil {
@@ -295,8 +299,12 @@ func runGUI(retryMutex bool) {
 
 	bindAPI(w)
 	go checkForUpdateOnLaunch()
+	go cleanupUpdateSplash()
 
 	hwnd := uintptr(w.Window())
+	revealMainWindowOnce = sync.OnceFunc(func() { revealMainWindow(hwnd) })
+	// Fallback in case the page never calls uiReady.
+	time.AfterFunc(6*time.Second, func() { w.Dispatch(revealMainWindowOnce) })
 	setWindowIconFromResource(hwnd)
 	forceForeground(hwnd)
 	// A second, delayed reassertion — confirmed live 2026-09-23 that the
@@ -634,12 +642,48 @@ func bindAPI(w webview2.WebView) {
 	// (JS side): the service's version was already observed to differ
 	// from this page's own, meaning the install is confirmed finished
 	// already — no install race left to wait out.
+	// setUpdateSplashStyle hands the update window (updatesplash_windows.go)
+	// this window's language and theme; called right before
+	// startUpdateCheck/closeForUpdate. Windows only — feature-detected in JS.
+	must(w.Bind("setUpdateSplashStyle", func(title, checking, installing, upToDate, failed string, light bool, grad string) {
+		pendingSplashStyle = updateSplashInfo{
+			Title: title, TextChecking: checking, TextInstalling: installing,
+			TextUpToDate: upToDate, TextFailed: failed, Light: light, Grad: grad,
+		}
+	}))
+
+	// startUpdateCheck backs "Check for updates" on Windows: the update
+	// window does the check (and the install, if there is one) and reopens
+	// the GUI afterwards; this window closes as soon as it's showing.
+	// Bindings run on the UI thread, and launchUpdateSplash waits for the
+	// update window to paint, so do it in the background; on failure fall
+	// back to checking in this window.
+	must(w.Bind("startUpdateCheck", func() {
+		go func() {
+			if err := launchUpdateSplash(splashModeCheck, currentHwnd); err != nil {
+				log.Printf("startUpdateCheck: %v", err)
+				w.Dispatch(func() { w.Eval("backgroundUpdateHandled = false; checkUpdateInWindow();") })
+				return
+			}
+			w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
+		}()
+	}))
+
+	// uiReady is called by the page once it has painted: bring the window
+	// on screen (runGUI creates it off screen) and tell a waiting update
+	// window it can go — see guiReadyEventName.
+	must(w.Bind("uiReady", func() {
+		revealMainWindowOnce()
+		signalGUIReady()
+	}))
+
 	must(w.Bind("closeForUpdate", func(delayMs int, alreadyDone bool) error {
 		exePath, err := os.Executable()
 		if err != nil {
 			return err
 		}
 		var createArgs []string
+		splashShown := false
 		if alreadyDone {
 			// Nothing left to wait for — just enough slack for this
 			// window's own DestroyWindow to release the single-instance
@@ -687,13 +731,6 @@ func bindAPI(w webview2.WebView) {
 			// instead of the GUI's exe. Falls back to launching anyway
 			// once the poll gives up after ~80s so a genuinely stuck
 			// install doesn't leave the GUI gone forever.
-			stateDir, dirErr := updateStateDir()
-			if dirErr != nil {
-				return dirErr
-			}
-			if err := os.MkdirAll(stateDir, 0o755); err != nil {
-				return err
-			}
 			// Tell the service to schedule the install bat NOW — the GUI is
 			// about to close (DestroyWindow fires after delayMs), so
 			// spectrune.exe's file lock will be gone well within the bat's
@@ -704,6 +741,26 @@ func bindAPI(w webview2.WebView) {
 			if client, dialErr := ipcDial(); dialErr == nil {
 				_ = client.Call("Bridge.TriggerInstall", struct{}{}, new(struct{}))
 				client.Close()
+			}
+
+			// Preferred since v2.0.57.0: the update window
+			// (updatesplash_windows.go), which does the same wait-then-
+			// relaunch as the VBScript watcher below but keeps a progress
+			// bar on screen the whole time. The watcher stays as the
+			// fallback if it can't be started.
+			if splashErr := launchUpdateSplash(splashModeInstall, currentHwnd); splashErr == nil {
+				splashShown = true
+			} else {
+				log.Printf("closeForUpdate: update window unavailable, using the invisible watcher: %v", splashErr)
+			}
+		}
+		if createArgs == nil && !splashShown {
+			stateDir, dirErr := updateStateDir()
+			if dirErr != nil {
+				return dirErr
+			}
+			if err := os.MkdirAll(stateDir, 0o755); err != nil {
+				return err
 			}
 
 			// $seen guards against the install task not existing *yet* —
@@ -752,7 +809,11 @@ func bindAPI(w webview2.WebView) {
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		}
-		if out, err := exec.Command("schtasks", createArgs...).CombinedOutput(); err != nil {
+		if splashShown {
+			w.Dispatch(func() { procDestroyWindow.Call(currentHwnd) })
+			return nil
+		}
+		if out, err := hiddenCommand("schtasks", createArgs...).CombinedOutput(); err != nil {
 			return fmt.Errorf("schtasks /create: %w (%s)", err, string(out))
 		}
 		// Also fire it explicitly rather than trusting the /st trigger a
@@ -769,7 +830,7 @@ func bindAPI(w webview2.WebView) {
 		// if the trigger *does* also fire on its own — Task Scheduler
 		// simply won't start a second concurrent instance of the same
 		// task (default multiple-instances policy).
-		if out, err := exec.Command("schtasks", "/run", "/tn", "SpectruneRelaunchAfterUpdate").CombinedOutput(); err != nil {
+		if out, err := hiddenCommand("schtasks", "/run", "/tn", "SpectruneRelaunchAfterUpdate").CombinedOutput(); err != nil {
 			log.Printf("closeForUpdate: schtasks /run failed (non-fatal, /st trigger may still fire): %v (%s)", err, out)
 		}
 		if delayMs > 0 {

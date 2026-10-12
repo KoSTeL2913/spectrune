@@ -166,6 +166,7 @@ const (
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
 	nifTip     = 0x00000004
+	nifGUID    = 0x00000020
 
 	nimAdd    = 0x00000000
 	nimModify = 0x00000001
@@ -247,8 +248,19 @@ type notifyIconDataW struct {
 	hBalloonIcon     windows.Handle
 }
 
+// trayIconGUID identifies Spectrune's tray icon to the shell by app
+// rather than by (window, id). An icon added by (window, id) outlives a
+// process that was killed (taskkill /f in the update bat, Task Manager…)
+// as a dead "ghost" until the mouse passes over it, so they piled up
+// (reported 2026-10-12). With a GUID, every new GUI first deletes the
+// previous instance's icon by that GUID, then adds its own. Windows binds
+// a GUID to the exe path that first registered it, so it only works for
+// the installed exe — newTrayIcon falls back to plain ids otherwise.
+var trayIconGUID = windows.GUID{Data1: 0x9b77c8f4, Data2: 0xb656, Data3: 0x4fbe, Data4: [8]byte{0xb8, 0x2c, 0xfe, 0x8d, 0x95, 0x88, 0x54, 0xaf}}
+
 type trayIcon struct {
-	hwnd uintptr
+	hwnd    uintptr
+	useGUID bool // see trayIconGUID
 
 	activeIcon   windows.Handle
 	inactiveIcon windows.Handle
@@ -419,18 +431,32 @@ func newTrayIcon(onShow, onExit func()) (*trayIcon, error) {
 		// alongside its icon-state poll.
 		t.refreshHotkeys()
 
+		// Remove a ghost icon left by a previous, killed instance.
+		var ghost notifyIconDataW
+		ghost.cbSize = uint32(unsafe.Sizeof(ghost))
+		ghost.uFlags = nifGUID
+		ghost.guidItem = trayIconGUID
+		procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&ghost)))
+
 		var nid notifyIconDataW
-		nid.cbSize = uint32(unsafe.Sizeof(nid))
-		nid.hWnd = windows.Handle(hwnd)
-		nid.uID = 1
-		nid.uFlags = nifMessage | nifIcon | nifTip
+		t.useGUID = true
+		t.fillID(&nid)
+		nid.uFlags |= nifMessage | nifIcon | nifTip
 		nid.uCallbackMessage = wmAppTrayMsg
 		nid.hIcon = t.inactiveIcon
 		t.currentIcon = t.inactiveIcon
 		t.currentTip = t.disconnectedTip
 		copyStringToBuf(nid.szTip[:], t.disconnectedTip)
 
-		if r, _, _ := procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid))); r == 0 {
+		r, _, _ := procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
+		if r == 0 {
+			// GUID already bound to another exe path (e.g. a dev build).
+			t.useGUID = false
+			t.fillID(&nid)
+			nid.uFlags = nifMessage | nifIcon | nifTip
+			r, _, _ = procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
+		}
+		if r == 0 {
 			ready <- fmt.Errorf("Shell_NotifyIconW(NIM_ADD) failed")
 			return
 		}
@@ -448,9 +474,7 @@ func newTrayIcon(onShow, onExit func()) (*trayIcon, error) {
 		}
 
 		var delNid notifyIconDataW
-		delNid.cbSize = uint32(unsafe.Sizeof(delNid))
-		delNid.hWnd = windows.Handle(t.hwnd)
-		delNid.uID = 1
+		t.fillID(&delNid)
 		procShellNotifyIconW.Call(nimDelete, uintptr(unsafe.Pointer(&delNid)))
 	}()
 
@@ -788,13 +812,23 @@ func (t *trayIcon) SetState(connected bool, profileName string) {
 	t.currentTip = tip
 
 	var nid notifyIconDataW
-	nid.cbSize = uint32(unsafe.Sizeof(nid))
-	nid.hWnd = windows.Handle(t.hwnd)
-	nid.uID = 1
-	nid.uFlags = nifIcon | nifTip
+	t.fillID(&nid)
+	nid.uFlags |= nifIcon | nifTip
 	nid.hIcon = icon
 	copyStringToBuf(nid.szTip[:], tip)
 	procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&nid)))
+}
+
+// fillID sets the fields that identify this icon to the shell.
+func (t *trayIcon) fillID(nid *notifyIconDataW) {
+	nid.cbSize = uint32(unsafe.Sizeof(*nid))
+	nid.hWnd = windows.Handle(t.hwnd)
+	nid.uID = 1
+	nid.uFlags = 0
+	if t.useGUID {
+		nid.uFlags = nifGUID
+		nid.guidItem = trayIconGUID
+	}
 }
 
 // Close removes the tray icon and stops its message loop. Posts WM_CLOSE
