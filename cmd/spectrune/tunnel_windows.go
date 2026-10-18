@@ -31,6 +31,10 @@ type outboundTunnel struct {
 	net *netstack.Net
 	dns []netip.Addr // DNS servers from the WireGuard config (or [1.1.1.1])
 
+	// privateKey lets Bridge.tunnelPrivateKeyInUse refuse a second
+	// connected profile with the same WireGuard identity.
+	privateKey conf.Key
+
 	// includedApps is read on every intercepted connection (matches) and
 	// can be rewritten live while connected (updateIncludedApps, driven by
 	// Service.SaveProfile editing the currently-active profile) — editing
@@ -139,6 +143,7 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 	return &outboundTunnel{
 		dev:          dev,
 		net:          tnet,
+		privateKey:   cfg.Interface.PrivateKey,
 		dns:          dns,
 		includedApps: included,
 		domains:      resolvedDomains,
@@ -218,6 +223,38 @@ func (t *outboundTunnel) matches(exePath string) bool {
 		return t.includedApps[norm]
 	}
 	return false
+}
+
+// isFullTunnel reports whether this profile has no app selection, i.e.
+// routes everything not claimed by another connected profile — see
+// Bridge.pickTunnel.
+func (t *outboundTunnel) isFullTunnel() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.includedApps) == 0
+}
+
+// sharedApp returns the first of apps this tunnel already routes, or ""
+// — see Bridge.appClaimedBy.
+func (t *outboundTunnel) sharedApp(apps []string) string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, app := range apps {
+		clean := strings.ToLower(filepath.Clean(app))
+		if t.includedApps[clean] {
+			return app
+		}
+		if norm := normalizeVersionedPath(clean); norm != "" && t.includedApps[norm] {
+			return app
+		}
+	}
+	return ""
+}
+
+// close shuts the tunnel's WireGuard device (and with it the netstack)
+// down — called when its profile is disconnected.
+func (t *outboundTunnel) close() {
+	t.dev.Close()
 }
 
 // updateIncludedApps swaps in a new app selection for an already-running

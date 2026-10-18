@@ -234,6 +234,8 @@ const webUIHTML = `<!DOCTYPE html>
   }
   .included-app-icon:not([src]) { visibility: hidden; }
   .included-apps-fulltunnel { color: var(--muted); font-size: 12px; }
+  .tunnel-block + .tunnel-block { margin-top: 10px; }
+  .tunnel-head { margin-bottom: 5px; }
   .theme-panel-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .theme-panel-row + .theme-panel-row { margin-top: 9px; }
   .theme-panel-label { color: var(--muted); font-size: 11px; width: 100%; }
@@ -422,7 +424,7 @@ const webUIHTML = `<!DOCTYPE html>
     <button id="btn-domains" disabled data-i18n="domains">Domains…</button>
     <button id="btn-delete" disabled data-i18n="delete">Delete</button>
   </div>
-  <div class="status-line">
+  <div class="status-line" id="status-line">
     <span id="status-text" class="status-text disconnected"></span>
   </div>
   <div id="included-apps-row" class="included-apps" style="display:none"></div>
@@ -481,6 +483,7 @@ const webUIHTML = `<!DOCTYPE html>
     <button id="btn-save-preset" data-i18n="presetSaveAs">Save as…</button>
     <button id="btn-delete-preset" data-i18n="presetDelete">Delete</button>
   </div>
+  <div id="apps-taken-note" class="hint" style="display:none"></div>
   <ul id="apps-list" class="app-list flex-grow"></ul>
   <div class="row">
     <button id="btn-browse-app" data-i18n="add">Add…</button>
@@ -573,6 +576,7 @@ var I18N = {
     searchPlaceholder: 'Search installed applications…',
     selectAll: 'Select all', clearSelection: 'Clear selection',
     routedApps: 'Routed through the tunnel:',
+    appsTakenNote: 'Apps routed by connected profile(s) %s are hidden.',
     noAppsFullTunnel: 'Nothing selected — all traffic goes through the VPN.',
     settingsTitle: 'Settings', settingsLanguage: 'Language',
     settingsAutostart: 'Launch on Windows startup',
@@ -628,6 +632,7 @@ var I18N = {
     searchPlaceholder: 'Поиск установленных приложений…',
     selectAll: 'Выбрать все', clearSelection: 'Очистить выбор',
     routedApps: 'Маршрутизируются через туннель:',
+    appsTakenNote: 'Скрыты приложения, которые уже идут через подключённые профили: %s.',
     noAppsFullTunnel: 'Ничего не выбрано — весь трафик идёт через VPN.',
     settingsTitle: 'Настройки', settingsLanguage: 'Язык',
     settingsAutostart: 'Запускать при старте Windows',
@@ -696,18 +701,21 @@ var state = {
                        // what the 3s status poll thinks, so a slow
                        // Connect can't be double-clicked into "already
                        // connected"
-  connected: false,
-  connectedProfile: '',
-  handshakeOK: false,
-  // connectStartedAt/connectError back the "give up and say so" timeout in
-  // refreshStatus below — a dead/blocked server (e.g. a router whitelist
-  // that only lets specific traffic out) used to leave the UI on
-  // "Connecting…" forever with no way to tell the two apart, and left the
-  // bridge's own default-route override in place indefinitely too. Reported
-  // 2026-09-14.
-  connectStartedAt: null,
-  connectError: false,
-  lastConnectErrorProfile: null, // which row gets the error label — see refreshStatus
+  // active maps every connected profile's name to whether its WireGuard
+  // handshake has completed; activeOrder is the same names in connect
+  // order. Several profiles can be connected at once — see
+  // applyStateReply for how a backend that only reports one (Linux) maps
+  // onto this.
+  active: {},
+  activeOrder: [],
+  // connectStartedAt/errorProfiles back the "give up and say so" timeout
+  // in refreshStatus below, per profile — a dead/blocked server (e.g. a
+  // router whitelist that only lets specific traffic out) used to leave
+  // the UI on "Connecting…" forever with no way to tell the two apart,
+  // and left the bridge's own default-route override in place
+  // indefinitely too. Reported 2026-09-14.
+  connectStartedAt: {},
+  errorProfiles: {}, // which rows get the error label — see refreshStatus
   editingExisting: false,
   installedApps: [],
   includedApps: [],   // lowercase path -> path, preserved case
@@ -718,6 +726,7 @@ var state = {
   editingDomainList: null, // name of the domain list open in view-domain-edit
   editHotkey: '',
   editOriginalName: null,
+  takenApps: {}, // see loadTakenApps
   lang: (function() { try { return localStorage.getItem('lang') || 'en'; } catch (e) { return 'en'; } })(),
   theme: (function() {
     var fallback = { mode: 'dark', accent: 'violet', customColor1: '#7a5cff', customColor2: '#ff3ea5', bgImage: '', bgFit: 'contain' };
@@ -742,6 +751,53 @@ function show(id) {
 
 // ---------- list view ----------
 
+function isActive(name) {
+  return Object.prototype.hasOwnProperty.call(state.active, name);
+}
+
+// applyStateReply copies a getState() reply into state.active. Tunnels
+// lists every connected profile (Windows); a backend without it (Linux)
+// only ever has the one described by Connected/ProfileName/HandshakeOK.
+function applyStateReply(s) {
+  var tunnels = s.Tunnels;
+  if (!tunnels) {
+    tunnels = s.Connected && s.ProfileName ? [{Name: s.ProfileName, HandshakeOK: s.HandshakeOK}] : [];
+  }
+  state.active = {};
+  state.activeOrder = [];
+  tunnels.forEach(function(ts) {
+    state.active[ts.Name] = !!ts.HandshakeOK;
+    state.activeOrder.push(ts.Name);
+  });
+}
+
+// disconnectOne disconnects just name, leaving other connected profiles
+// alone. A backend that can only run one profile (no disconnectProfile
+// binding — Linux) just disconnects.
+function disconnectOne(name) {
+  return window.disconnectProfile ? disconnectProfile(name) : disconnect();
+}
+
+function setRowStatus(statusEl, name) {
+  if (isActive(name)) {
+    // Short, unparametrized labels — not the tf('connected'/'connecting',
+    // name) versions the old bottom status bar used, since this row
+    // already shows the name right above; reusing those templates here
+    // literally printed "%s" (nothing filled it in — found live
+    // 2026-09-04).
+    var ok = state.active[name];
+    statusEl.textContent = ok ? t('connectedShort') : t('connectingShort');
+    statusEl.className = 'profile-row-status ' + (ok ? 'connected' : 'connecting');
+  } else if (state.errorProfiles[name]) {
+    // See refreshStatus's connect-timeout branch.
+    statusEl.textContent = t('errorShort');
+    statusEl.className = 'profile-row-status error';
+  } else {
+    statusEl.textContent = '';
+    statusEl.className = 'profile-row-status';
+  }
+}
+
 function renderProfileList() {
   var ul = $('profile-list');
   ul.innerHTML = '';
@@ -764,22 +820,8 @@ function renderProfileList() {
     nameEl.textContent = name;
     var statusEl = document.createElement('div');
     statusEl.className = 'profile-row-status';
-    var isActive = state.connected && state.connectedProfile === name;
-    if (isActive) {
-      // Short, unparametrized labels — not the tf('connected'/'connecting',
-      // name) versions the old bottom status bar used, since this row
-      // already shows the name in nameEl right above; reusing those
-      // templates here literally printed "%s" (nothing filled it in —
-      // found live 2026-09-04).
-      statusEl.textContent = state.handshakeOK ? t('connectedShort') : t('connectingShort');
-      statusEl.className = 'profile-row-status ' + (state.handshakeOK ? 'connected' : 'connecting');
-    } else if (name === state.lastConnectErrorProfile) {
-      // See refreshStatus's connect-timeout branch — this used to only
-      // ever show in the (now-removed) bottom status bar, with no way to
-      // tell which profile it was even about.
-      statusEl.textContent = t('errorShort');
-      statusEl.className = 'profile-row-status error';
-    }
+    var rowActive = isActive(name);
+    setRowStatus(statusEl, name);
     var routingEl = document.createElement('div');
     routingEl.className = 'profile-row-routing';
     loadRoutingSummaryInto(name, routingEl);
@@ -794,10 +836,10 @@ function renderProfileList() {
     // actual pill-shaped button element so it still *reads* as a real
     // Connect/Disconnect button, not just colored text.
     var connectZone = document.createElement('div');
-    connectZone.className = 'profile-row-connect' + (isActive ? ' active' : '') + (state.connectBusy ? ' busy' : '');
+    connectZone.className = 'profile-row-connect' + (rowActive ? ' active' : '') + (state.connectBusy ? ' busy' : '');
     var connectBtnInner = document.createElement('span');
     connectBtnInner.className = 'profile-row-connect-btn';
-    connectBtnInner.textContent = isActive ? t('disconnect') : t('connect');
+    connectBtnInner.textContent = rowActive ? t('disconnect') : t('connect');
     connectZone.appendChild(connectBtnInner);
     connectZone.onclick = function(e) {
       e.stopPropagation();
@@ -831,22 +873,12 @@ function updateProfileRowStates() {
     var name = li.dataset.name;
     if (name === undefined) return; // the "no profiles" empty placeholder
     li.classList.toggle('selected', name === state.selected);
-    var isActive = state.connected && state.connectedProfile === name;
-    var statusEl = li.querySelector('.profile-row-status');
-    if (isActive) {
-      statusEl.textContent = state.handshakeOK ? t('connectedShort') : t('connectingShort');
-      statusEl.className = 'profile-row-status ' + (state.handshakeOK ? 'connected' : 'connecting');
-    } else if (name === state.lastConnectErrorProfile) {
-      statusEl.textContent = t('errorShort');
-      statusEl.className = 'profile-row-status error';
-    } else {
-      statusEl.textContent = '';
-      statusEl.className = 'profile-row-status';
-    }
+    var rowActive = isActive(name);
+    setRowStatus(li.querySelector('.profile-row-status'), name);
     var connectZone = li.querySelector('.profile-row-connect');
-    connectZone.classList.toggle('active', isActive);
+    connectZone.classList.toggle('active', rowActive);
     connectZone.classList.toggle('busy', state.connectBusy);
-    connectZone.querySelector('.profile-row-connect-btn').textContent = isActive ? t('disconnect') : t('connect');
+    connectZone.querySelector('.profile-row-connect-btn').textContent = rowActive ? t('disconnect') : t('connect');
   });
   updateButtons();
   refreshIncludedAppsPreview();
@@ -854,10 +886,10 @@ function updateProfileRowStates() {
 
 // toggleConnectRow is the row's right-half connect/disconnect zone (see
 // its CSS doc — this is now the only way to connect, there's no separate
-// bottom Connect button any more) — disconnect if this row is the active
-// profile, otherwise connect to it (disconnecting whatever else is
-// active first, since Bridge.Connect refuses to run alongside an
-// existing connection — see service.go). connectBusy guards against a
+// bottom Connect button any more) — disconnect this row's profile if
+// it's connected, otherwise connect it alongside whatever else already
+// is (or, on a backend that runs only one profile at a time — no
+// disconnectProfile binding — switch to it). connectBusy guards against a
 // double-click race the same way the old bottom button's handler did
 // (fixed live 2026-09-04) — this is the only trigger left, so it has to
 // carry that guard itself now.
@@ -866,15 +898,16 @@ function toggleConnectRow(name) {
   state.connectBusy = true;
   updateProfileRowStates();
   var p;
-  if (state.connected && state.connectedProfile === name) {
-    p = disconnect();
-  } else if (state.connected) {
-    p = disconnect().then(function() { return connect(name); });
+  if (isActive(name)) {
+    p = disconnectOne(name);
   } else {
-    state.connectError = false;
-    state.lastConnectErrorProfile = null;
-    state.connectStartedAt = null;
-    p = connect(name);
+    delete state.errorProfiles[name];
+    delete state.connectStartedAt[name];
+    if (!window.disconnectProfile && state.activeOrder.length > 0) {
+      p = disconnect().then(function() { return connect(name); });
+    } else {
+      p = connect(name);
+    }
   }
   p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
     .finally(function() { state.connectBusy = false; updateProfileRowStates(); });
@@ -888,19 +921,22 @@ function updateButtons() {
   $('btn-delete').disabled = !has;
   // Readout only — see profile-row-connect for the actual per-row
   // Connect/Disconnect action, there's no button down here any more.
-  if (state.connected && state.handshakeOK) {
-    $('status-text').textContent = tf('connected', state.connectedProfile);
+  var up = state.activeOrder.filter(function(n) { return state.active[n]; });
+  var pending = state.activeOrder.filter(function(n) { return !state.active[n]; });
+  var anyError = Object.keys(state.errorProfiles).length > 0;
+  if (up.length > 0) {
+    $('status-text').textContent = tf('connected', up.join(', '));
     $('status-text').className = 'status-text connected';
-  } else if (state.connected) {
+  } else if (pending.length > 0) {
     // Adapter/local bridge is up but the WireGuard handshake with the
     // peer hasn't completed (or never will, for a bad config/dead
     // server) — see StateReply.HandshakeOK's doc in service.go. Used to
     // just say "Connected" here regardless, which was actively
     // misleading: confirmed live 2026-09-04 with a profile whose tunnel
     // never actually passed traffic.
-    $('status-text').textContent = tf('connecting', state.connectedProfile);
+    $('status-text').textContent = tf('connecting', pending.join(', '));
     $('status-text').className = 'status-text connecting';
-  } else if (state.connectError) {
+  } else if (anyError) {
     $('status-text').textContent = t('connectionError');
     $('status-text').className = 'status-text disconnected error';
   } else {
@@ -910,7 +946,7 @@ function updateButtons() {
   // Same colored-when-connected / grey-when-disconnected swap as the tray
   // icon (tray.go) and the Linux awg-gui counterpart's AppIndicator —
   // colored only once the handshake actually confirms the tunnel works.
-  var reallyConnected = state.connected && state.handshakeOK;
+  var reallyConnected = up.length > 0;
   $('brand-icon-active').style.opacity = reallyConnected ? '1' : '0';
   $('brand-icon-inactive').style.opacity = reallyConnected ? '0' : '1';
 }
@@ -1027,77 +1063,76 @@ function loadRoutingSummaryInto(name, el) {
 // ---------- included-apps preview (under Connect/Disconnect) ----------
 
 var includedPreviewCache = {}; // profile name -> IncludedApps array, cleared whenever that profile is saved
-var includedAppsPreviewRenderedFor = undefined; // last name (or null) this actually rendered for
+var includedPreviewLoading = {}; // profile name -> true while its loadProfile is in flight
 
+// includedAppsPreviewRenderedFor is the signature (see
+// refreshIncludedAppsPreview) of what the row last rendered, or undefined
+// to force a re-render.
+var includedAppsPreviewRenderedFor = undefined;
+
+// refreshIncludedAppsPreview fills the panel under the profile list. While
+// anything is connected it shows one block per connected profile: its
+// name and status, then its routed apps as icons (or "all traffic").
+// With nothing connected it previews the selected profile's apps.
 function refreshIncludedAppsPreview() {
   var row = $('included-apps-row');
-  // Prefer the profile that's actually connected over merely-selected —
-  // the per-row quick-connect button (toggleConnectRow) connects without
-  // selecting a row, so this used to just stay empty after connecting
-  // that way instead of showing what's actually being routed (found live
-  // 2026-09-04).
-  var name = state.connected ? state.connectedProfile : state.selected;
-  // Skip re-rendering when nothing relevant changed — called from
-  // updateProfileRowStates's 3s poll now (see that function's own call
-  // site comment for why), and rebuilding this row's <img> elements
-  // unconditionally every tick would flicker/reload icons exactly like
-  // the profile-list hover bug this same poll loop already had to work
-  // around once (v2.0.13.0). Still worth calling every tick despite the
-  // guard, not just from renderProfileList's one-shot: connecting via
-  // toggleConnectRow can have state.connectedProfile lag behind
-  // state.connected by a poll or two, and loadProfile() below can fail
-  // transiently over IPC — with renderProfileList being the only
-  // trigger (true before this fix), landing in that gap left this row
-  // permanently blank or stuck showing the previous profile's icons
-  // until something else forced a full profile-list rebuild (language
-  // switch, add/rename/delete a profile). Reported live 2026-09-18:
-  // "иногда не хочет отображаться что добавлено в маршрутизацию под
-  // надписью подключено" (routed-apps icons sometimes just don't show
-  // up under "Connected").
-  if (name === includedAppsPreviewRenderedFor) return;
-  if (!name) {
-    includedAppsPreviewRenderedFor = name;
+  var connected = state.activeOrder.length > 0;
+  $('status-line').style.display = connected ? 'none' : '';
+  var names = connected ? state.activeOrder.slice() : (state.selected ? [state.selected] : []);
+  // Called from updateProfileRowStates's 3s poll — fetch whatever isn't
+  // cached yet (and retry a failed fetch next tick), then only rebuild
+  // the DOM when something visible actually changed, so icons don't
+  // flicker/reload every tick (same reason as the v2.0.13.0 hover fix).
+  names.forEach(function(n) {
+    if (includedPreviewCache[n] !== undefined || includedPreviewLoading[n]) return;
+    includedPreviewLoading[n] = true;
+    loadProfile(n).then(function(details) {
+      includedPreviewCache[n] = details.IncludedApps || [];
+      refreshIncludedAppsPreview();
+    }).catch(function() { /* retried on the next poll tick */ })
+      .finally(function() { delete includedPreviewLoading[n]; });
+  });
+  var sig = JSON.stringify([state.lang, connected, names.map(function(n) {
+    return [n, connected ? state.active[n] : null, includedPreviewCache[n] || null];
+  })]);
+  if (sig === includedAppsPreviewRenderedFor) return;
+  includedAppsPreviewRenderedFor = sig;
+  if (names.length === 0) {
     row.style.display = 'none';
     row.innerHTML = '';
     return;
   }
-  var cached = includedPreviewCache[name];
-  if (cached !== undefined) {
-    includedAppsPreviewRenderedFor = name;
-    renderIncludedAppsPreview(cached);
+  if (!connected) {
+    var apps = includedPreviewCache[names[0]];
+    if (apps === undefined) return; // still loading
+    renderIncludedAppsPreview(apps);
     return;
   }
-  // Deliberately doesn't mark includedAppsPreviewRenderedFor until this
-  // resolves — a transient IPC failure (loadProfile's catch below) must
-  // leave it eligible for a retry on the next poll tick, not get stuck
-  // treated as "already handled" for a profile that never actually
-  // rendered.
-  loadProfile(name).then(function(details) {
-    var apps = details.IncludedApps || [];
-    includedPreviewCache[name] = apps;
-    var stillCurrent = state.connected ? state.connectedProfile === name : state.selected === name;
-    if (stillCurrent) {
-      includedAppsPreviewRenderedFor = name;
-      renderIncludedAppsPreview(apps);
-    }
-  }).catch(function() { /* leave whatever was showing; eligible for retry next tick */ });
-}
-
-function renderIncludedAppsPreview(apps) {
-  var row = $('included-apps-row');
   row.innerHTML = '';
   row.style.display = 'block';
+  names.forEach(function(n) {
+    var block = document.createElement('div');
+    block.className = 'tunnel-block';
+    var head = document.createElement('div');
+    var ok = state.active[n];
+    head.className = 'status-text tunnel-head ' + (ok ? 'connected' : 'connecting');
+    head.textContent = n + ' — ' + (ok ? t('connectedShort') : t('connectingShort'));
+    block.appendChild(head);
+    var apps = includedPreviewCache[n];
+    if (apps !== undefined) block.appendChild(includedAppsIcons(apps));
+    row.appendChild(block);
+  });
+}
+
+// includedAppsIcons builds a row of app icons, or the "all traffic" note
+// for a profile with no app selection.
+function includedAppsIcons(apps) {
   if (apps.length === 0) {
     var note = document.createElement('div');
     note.className = 'included-apps-fulltunnel';
     note.textContent = t('noAppsFullTunnel');
-    row.appendChild(note);
-    return;
+    return note;
   }
-  var label = document.createElement('div');
-  label.className = 'included-apps-label';
-  label.textContent = t('routedApps');
-  row.appendChild(label);
   var icons = document.createElement('div');
   icons.className = 'included-apps-icons';
   apps.forEach(function(p) {
@@ -1107,7 +1142,20 @@ function renderIncludedAppsPreview(apps) {
     loadAppIcon(p, img);
     icons.appendChild(img);
   });
-  row.appendChild(icons);
+  return icons;
+}
+
+function renderIncludedAppsPreview(apps) {
+  var row = $('included-apps-row');
+  row.innerHTML = '';
+  row.style.display = 'block';
+  if (apps.length > 0) {
+    var label = document.createElement('div');
+    label.className = 'included-apps-label';
+    label.textContent = t('routedApps');
+    row.appendChild(label);
+  }
+  row.appendChild(includedAppsIcons(apps));
 }
 
 function refreshStatus() {
@@ -1131,49 +1179,41 @@ function refreshStatus() {
     // refreshProfiles() again. See its own doc for the full story.
     if (state.profilesLoadFailed) refreshProfiles();
 
-    state.connected = s.Connected;
-    state.connectedProfile = s.ProfileName;
-    state.handshakeOK = s.HandshakeOK;
+    applyStateReply(s);
 
-    if (!state.connected || state.handshakeOK) {
-      // Either fully connected or fully disconnected — no pending
-      // handshake to time out, so nothing to track.
-      state.connectStartedAt = null;
+    // A connected profile without a WireGuard handshake yet is normal for
+    // the first few seconds of every connect, but a server that's
+    // actually unreachable (wrong endpoint, or — reported 2026-09-14 — a
+    // router that whitelists only specific traffic and blocks the rest)
+    // leaves it there forever with no way to distinguish "still trying"
+    // from "never going to work", and leaves the bridge's default-route
+    // override sitting on a dead tunnel the whole time. Give each
+    // profile a fixed window, then give up on it: disconnect just that
+    // one and flag its row instead of hanging on "Connecting…".
+    var now = Date.now();
+    var timedOut = [];
+    Object.keys(state.connectStartedAt).forEach(function(n) {
+      if (!isActive(n) || state.active[n]) delete state.connectStartedAt[n];
+    });
+    state.activeOrder.forEach(function(n) {
+      if (state.active[n]) return;
+      if (!state.connectStartedAt[n]) state.connectStartedAt[n] = now;
+      else if (now - state.connectStartedAt[n] >= CONNECT_TIMEOUT_MS) timedOut.push(n);
+    });
+    if (timedOut.length === 0) {
       updateProfileRowStates();
       return;
     }
-
-    // Connected == bridge/adapter is up, but no WireGuard handshake yet.
-    // That's normal for the first few seconds of every connect, but a
-    // server that's actually unreachable (wrong endpoint, or — reported
-    // 2026-09-14 — a router that whitelists only specific traffic and
-    // blocks the rest) leaves it here forever with no way to distinguish
-    // "still trying" from "never going to work", and leaves the bridge's
-    // default-route override sitting on a dead tunnel the whole time.
-    // Give it a fixed window, then give up: disconnect (restoring normal
-    // routing) and say so plainly instead of hanging on "Connecting…".
-    if (!state.connectStartedAt) state.connectStartedAt = Date.now();
-    if (Date.now() - state.connectStartedAt < CONNECT_TIMEOUT_MS) {
-      updateProfileRowStates();
-      return;
-    }
-
-    state.connectStartedAt = null;
-    state.connectError = true;
-    // Captured before the disconnect+getState below overwrites
-    // connectedProfile — this is now the only record of which row to
-    // flag, since there's no bottom status bar to show a generic
-    // (unattributed) error in any more. See updateProfileRowStates's use
-    // of this for the per-row "Ошибка"/"Error" label.
-    state.lastConnectErrorProfile = state.connectedProfile;
+    timedOut.forEach(function(n) {
+      delete state.connectStartedAt[n];
+      state.errorProfiles[n] = true;
+    });
     state.connectBusy = true;
-    disconnect().then(function() {
+    timedOut.reduce(function(p, n) {
+      return p.then(function() { return disconnectOne(n); });
+    }, Promise.resolve()).then(function() {
       return getState();
-    }).then(function(s2) {
-      state.connected = s2.Connected;
-      state.connectedProfile = s2.ProfileName;
-      state.handshakeOK = s2.HandshakeOK;
-    }).catch(showListError).finally(function() {
+    }).then(applyStateReply).catch(showListError).finally(function() {
       state.connectBusy = false;
       updateProfileRowStates();
     });
@@ -1444,13 +1484,6 @@ function saveCurrentProfile() {
     return saveProfile(name, $('edit-config').value, state.includedApps, state.includedDomainLists, $('edit-autoconnect').checked, state.editHotkey).then(function() {
       delete includedPreviewCache[name];
       if (oldName && oldName !== name) delete includedPreviewCache[oldName];
-      // Also drop the "already rendered" guard (see refreshIncludedAppsPreview)
-      // — otherwise, since this profile's own name hasn't changed, that
-      // guard would keep skipping the re-render this cache invalidation
-      // is meant to trigger, leaving stale icons showing post-edit.
-      if (includedAppsPreviewRenderedFor === name || includedAppsPreviewRenderedFor === oldName) {
-        includedAppsPreviewRenderedFor = undefined;
-      }
     });
   };
   if (oldName && oldName !== name) {
@@ -1490,6 +1523,8 @@ function openAppsPicker() {
   // all — "Done" is the only path that's supposed to commit apps changes.
   state.includedAppsSnapshot = state.includedApps.slice();
   show('view-apps');
+  state.takenApps = {};
+  loadTakenApps().then(renderAppsList);
   listInstalledApps().then(function(apps) {
     state.installedApps = apps || [];
     // Keep any included paths that aren't in the discovered list (e.g. an
@@ -1505,6 +1540,30 @@ function openAppsPicker() {
     renderAppsList();
   }).catch(showEditError);
   refreshAppPresets();
+}
+
+// loadTakenApps fills state.takenApps (lowercase path -> profile name)
+// with the apps other connected profiles route, which renderAppsList
+// hides: one app can only go through one connected tunnel at a time (the
+// service refuses to connect a profile whose apps overlap a connected
+// one's).
+function loadTakenApps() {
+  // A backend that runs one profile at a time (no disconnectProfile —
+  // Linux) switches profiles instead, so nothing is ever shared.
+  if (!window.disconnectProfile) return Promise.resolve();
+  var others = state.activeOrder.filter(function(n) { return n !== state.editOriginalName; });
+  return Promise.all(others.map(function(n) {
+    return loadProfile(n).then(function(details) {
+      (details.IncludedApps || []).forEach(function(p) { state.takenApps[p.toLowerCase()] = n; });
+    }).catch(function() {});
+  }));
+}
+
+// isTakenApp reports whether path is hidden from this profile's picker
+// (routed by another connected profile and not already selected here).
+function isTakenApp(path, includedSet) {
+  var key = path.toLowerCase();
+  return state.takenApps[key] !== undefined && !includedSet[key];
 }
 
 // ---------- app presets ----------
@@ -1569,8 +1628,17 @@ function renderAppsList() {
   var includedSet = {};
   state.includedApps.forEach(function(p) { includedSet[p.toLowerCase()] = true; });
 
+  var takenBy = {};
+  state.installedApps.forEach(function(a) {
+    if (isTakenApp(a.Path, includedSet)) takenBy[state.takenApps[a.Path.toLowerCase()]] = true;
+  });
+  var takenNames = Object.keys(takenBy);
+  $('apps-taken-note').style.display = takenNames.length ? '' : 'none';
+  $('apps-taken-note').textContent = takenNames.length ? tf('appsTakenNote', takenNames.join(', ')) : '';
+
   state.installedApps
     .filter(function(a) {
+      if (isTakenApp(a.Path, includedSet)) return false;
       if (!filter) return true;
       return a.Name.toLowerCase().indexOf(filter) !== -1 || a.Path.toLowerCase().indexOf(filter) !== -1;
     })
@@ -1616,20 +1684,30 @@ function renderAppsList() {
     });
 }
 
-var iconCache = {}; // path (lowercase) -> data URI, or null while pending/failed
+// iconCache maps a lowercase path to the promise of its data URI, shared
+// by every <img> that asks for it. It used to hold null while a fetch
+// was pending, and any second <img> for the same path (the list being
+// re-rendered by a click/search mid-load, or the main screen's routed-
+// apps row, which never re-renders) just returned — leaving that icon
+// blank for good.
+var iconCache = {};
+
+// Generic app glyph for an exe whose icon can't be extracted, instead of
+// a blank/broken image.
+var FALLBACK_APP_ICON = 'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
+  '<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="#8a94a6"/>' +
+  '<rect x="1.5" y="2.5" width="13" height="3" rx="1.5" fill="#5d6678"/>' +
+  '<rect x="3.5" y="7.5" width="9" height="4" rx="1" fill="#e6e9ef"/></svg>');
 
 function loadAppIcon(path, imgEl) {
   var key = path.toLowerCase();
-  var cached = iconCache[key];
-  if (cached) { imgEl.src = cached; return; }
-  if (cached === null) return; // already tried, no icon available
-  iconCache[key] = null;
-  getAppIcon(path).then(function(dataUri) {
-    iconCache[key] = dataUri;
-    // The row may have been re-rendered (filter/toggle) since this
-    // fetch started — only apply if this exact <img> is still attached.
-    if (imgEl.isConnected) imgEl.src = dataUri;
-  }).catch(function() { /* no icon for this app — leave the placeholder blank */ });
+  if (!iconCache[key]) {
+    iconCache[key] = getAppIcon(path).catch(function() { return FALLBACK_APP_ICON; });
+  }
+  iconCache[key].then(function(dataUri) {
+    imgEl.src = dataUri;
+  });
 }
 
 function toggleApp(path) {
@@ -1646,7 +1724,11 @@ function toggleApp(path) {
 
 $('apps-search').oninput = function() { state.appsFilter = $('apps-search').value; renderAppsList(); };
 $('btn-select-all').onclick = function() {
-  state.includedApps = state.installedApps.map(function(a) { return a.Path; });
+  var includedSet = {};
+  state.includedApps.forEach(function(p) { includedSet[p.toLowerCase()] = true; });
+  state.includedApps = state.installedApps
+    .filter(function(a) { return !isTakenApp(a.Path, includedSet); })
+    .map(function(a) { return a.Path; });
   renderAppsList();
   updateAppsCount();
 };

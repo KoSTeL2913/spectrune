@@ -75,6 +75,11 @@ func dispatch(cmd string, args []string) bool {
 		client, err := ipcDial()
 		fatalIf(err)
 		defer client.Close()
+		if len(args) > 0 {
+			fatalIf(client.Call("Bridge.DisconnectProfile", args[0], &struct{}{}))
+			fmt.Printf("disconnected: %s\n", args[0])
+			break
+		}
 		fatalIf(client.Call("Bridge.Disconnect", struct{}{}, &struct{}{}))
 		fmt.Println("disconnected")
 	case "/status":
@@ -83,10 +88,15 @@ func dispatch(cmd string, args []string) bool {
 		defer client.Close()
 		var reply StateReply
 		fatalIf(client.Call("Bridge.State", struct{}{}, &reply))
-		if reply.Connected {
-			fmt.Printf("connected: %s\n", reply.ProfileName)
-		} else {
+		if !reply.Connected {
 			fmt.Println("disconnected")
+		}
+		for _, ts := range reply.Tunnels {
+			if ts.HandshakeOK {
+				fmt.Printf("connected: %s\n", ts.Name)
+			} else {
+				fmt.Printf("connecting: %s\n", ts.Name)
+			}
 		}
 	case "/list":
 		client, err := ipcDial()
@@ -176,8 +186,8 @@ func runLegacyDirect() {
 
 	cfg, watchedTunnelName := loadLegacyConfig()
 
-	bridge := &Bridge{}
-	if err := bridge.Start(cfg); err != nil {
+	bridge, err := startBridge(watchedTunnelName, cfg)
+	if err != nil {
 		log.Fatalf("Start: %v", err)
 	}
 

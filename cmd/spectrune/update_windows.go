@@ -29,8 +29,10 @@ import (
 // latestReleaseURL points at this project's own public GitHub repo — see
 // https://github.com/KoSTeL2913/spectrune/releases. Public repo, so the
 // GitHub API needs no auth token here (would otherwise mean embedding a
-// credential in a distributed .exe).
-const latestReleaseURL = "https://api.github.com/repos/KoSTeL2913/spectrune/releases/latest"
+// credential in a distributed .exe). A var, not a const, only so an
+// update test build can point it at a local fake release server
+// (EXTRA_LDFLAGS="-X main.latestReleaseURL=..." installer/build.sh).
+var latestReleaseURL = "https://api.github.com/repos/KoSTeL2913/spectrune/releases/latest"
 
 // updateInProgress mirrors update_linux.go's flag of the same name — the
 // GUI's background poll (webui_html.go's checkBackgroundUpdate, via

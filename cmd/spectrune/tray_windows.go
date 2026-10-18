@@ -174,6 +174,7 @@ const (
 
 	mfString    = 0x00000000
 	mfGrayed    = 0x00000001
+	mfChecked   = 0x00000008
 	mfSeparator = 0x00000800
 
 	tpmRightAlign  = 0x0008
@@ -277,10 +278,10 @@ type trayIcon struct {
 	disconnectedTip string
 	connectedTipFmt string
 
-	// menuDisconnectFmt/menuNoProfiles are the quick-connect submenu's
+	// menuDisconnectAll/menuNoProfiles are the quick-connect submenu's
 	// text — see showMenu, which rebuilds it fresh (via fetchMenuState)
 	// on every right-click rather than caching it.
-	menuDisconnectFmt string
+	menuDisconnectAll string
 	menuNoProfiles    string
 
 	// menuProfiles maps the dynamic profile menu-item IDs
@@ -362,14 +363,14 @@ func newTrayIcon(onShow, onExit func()) (*trayIcon, error) {
 		t.menuExitText = "Выход"
 		t.disconnectedTip = "Spectrune — Отключено"
 		t.connectedTipFmt = "Spectrune — Подключено: %s"
-		t.menuDisconnectFmt = "Отключить: %s"
+		t.menuDisconnectAll = "Отключить все"
 		t.menuNoProfiles = "Нет сохранённых профилей"
 	} else {
 		t.menuShowText = "Open"
 		t.menuExitText = "Exit"
 		t.disconnectedTip = "Spectrune — Disconnected"
 		t.connectedTipFmt = "Spectrune — Connected: %s"
-		t.menuDisconnectFmt = "Disconnect: %s"
+		t.menuDisconnectAll = "Disconnect all"
 		t.menuNoProfiles = "No saved profiles"
 	}
 
@@ -518,7 +519,7 @@ func (t *trayIcon) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 			}
 			t.mu.Unlock()
 			if name != "" {
-				go t.quickConnect(name)
+				go t.quickToggleProfile(name)
 			}
 		}
 		return 0
@@ -554,11 +555,11 @@ func (t *trayIcon) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 // service over IPC (fetchMenuState), rather than a cached/polled copy —
 // so it's never showing stale profile names or the wrong Connect/
 // Disconnect state. This is the "quick connect without opening the app"
-// feature: when disconnected, every saved profile is a one-click Connect
-// item; when connected, there's a single Disconnect item naming the
-// active profile instead.
+// feature: every saved profile is a one-click item that toggles it,
+// checked while connected (several can be at once), plus "Disconnect
+// all" when more than one is.
 func (t *trayIcon) showMenu(hwnd uintptr) {
-	profiles, connected, connectedProfile := t.fetchMenuState()
+	profiles, connected := t.fetchMenuState()
 
 	hMenu, _, _ := procCreatePopupMenu.Call()
 	if hMenu == 0 {
@@ -571,16 +572,22 @@ func (t *trayIcon) showMenu(hwnd uintptr) {
 	t.mu.Unlock()
 
 	switch {
-	case connected:
-		label, _ := windows.UTF16PtrFromString(fmt.Sprintf(t.menuDisconnectFmt, connectedProfile))
-		procAppendMenuW.Call(hMenu, mfString, trayMenuDisconnect, uintptr(unsafe.Pointer(label)))
 	case len(profiles) > 0:
 		t.mu.Lock()
 		t.menuProfiles = profiles
 		t.mu.Unlock()
 		for i, name := range profiles {
 			namePtr, _ := windows.UTF16PtrFromString(name)
-			procAppendMenuW.Call(hMenu, mfString, uintptr(trayMenuConnectBase+i), uintptr(unsafe.Pointer(namePtr)))
+			flags := uintptr(mfString)
+			if connected[name] {
+				flags |= mfChecked
+			}
+			procAppendMenuW.Call(hMenu, flags, uintptr(trayMenuConnectBase+i), uintptr(unsafe.Pointer(namePtr)))
+		}
+		if len(connected) > 1 {
+			procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
+			label, _ := windows.UTF16PtrFromString(t.menuDisconnectAll)
+			procAppendMenuW.Call(hMenu, mfString, trayMenuDisconnect, uintptr(unsafe.Pointer(label)))
 		}
 	default:
 		emptyLabel, _ := windows.UTF16PtrFromString(t.menuNoProfiles)
@@ -607,27 +614,20 @@ func (t *trayIcon) showMenu(hwnd uintptr) {
 // the GUI/webview for this) for a fresh profile list + connection state.
 // Failure just means an empty/disconnected menu, not an error dialog —
 // this runs on a right-click, there's nowhere good to surface it.
-func (t *trayIcon) fetchMenuState() (profiles []string, connected bool, connectedProfile string) {
+func (t *trayIcon) fetchMenuState() (profiles []string, connected map[string]bool) {
+	connected = map[string]bool{}
 	client, err := ipcDial()
 	if err != nil {
-		return nil, false, ""
+		return nil, connected
 	}
 	defer client.Close()
 	client.Call("Bridge.ListProfiles", struct{}{}, &profiles)
 	var state StateReply
 	client.Call("Bridge.State", struct{}{}, &state)
-	return profiles, state.Connected, state.ProfileName
-}
-
-func (t *trayIcon) quickConnect(name string) {
-	client, err := ipcDial()
-	if err != nil {
-		return
+	for _, ts := range state.Tunnels {
+		connected[ts.Name] = true
 	}
-	defer client.Close()
-	if err := client.Call("Bridge.Connect", name, &struct{}{}); err != nil {
-		log.Printf("tray quickConnect(%q): %v", name, err)
-	}
+	return profiles, connected
 }
 
 func (t *trayIcon) quickDisconnect() {
@@ -641,10 +641,9 @@ func (t *trayIcon) quickDisconnect() {
 	}
 }
 
-// quickToggleProfile is a per-profile hotkey's action: Disconnect if name
-// is the one currently connected, otherwise Connect to it (switching away
-// from whatever else might be active — only one tunnel ever runs at a
-// time in this app).
+// quickToggleProfile is a tray profile item's and a per-profile hotkey's
+// action: disconnect name if it's connected, otherwise connect it
+// alongside whatever else already is.
 func (t *trayIcon) quickToggleProfile(name string) {
 	client, err := ipcDial()
 	if err != nil {
@@ -657,18 +656,11 @@ func (t *trayIcon) quickToggleProfile(name string) {
 		log.Printf("tray quickToggleProfile(%q): State: %v", name, err)
 		return
 	}
-	if state.Connected && state.ProfileName == name {
-		if err := client.Call("Bridge.Disconnect", struct{}{}, &struct{}{}); err != nil {
-			log.Printf("tray quickToggleProfile(%q): Disconnect: %v", name, err)
-		}
-		return
-	}
-	if state.Connected {
-		// Bridge.Connect refuses while another profile is active (see
-		// service.go) — disconnect first so switching profiles by hotkey
-		// works instead of just erroring.
-		if err := client.Call("Bridge.Disconnect", struct{}{}, &struct{}{}); err != nil {
-			log.Printf("tray quickToggleProfile(%q): Disconnect (switching): %v", name, err)
+	for _, ts := range state.Tunnels {
+		if ts.Name == name {
+			if err := client.Call("Bridge.DisconnectProfile", name, &struct{}{}); err != nil {
+				log.Printf("tray quickToggleProfile(%q): DisconnectProfile: %v", name, err)
+			}
 			return
 		}
 	}
@@ -871,7 +863,13 @@ func pollTrayState(tray *trayIcon, stop <-chan struct{}) {
 		// The glyph only goes colored once the handshake actually
 		// succeeded, not just because the local adapter came up — see
 		// StateReply.HandshakeOK's doc.
-		tray.SetState(state.Connected && state.HandshakeOK, state.ProfileName)
+		var names []string
+		up := false
+		for _, ts := range state.Tunnels {
+			names = append(names, ts.Name)
+			up = up || ts.HandshakeOK
+		}
+		tray.SetState(up, strings.Join(names, ", "))
 		tray.PostRefreshHotkeys()
 	}
 

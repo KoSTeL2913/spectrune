@@ -534,6 +534,15 @@ func bindAPI(w webview2.WebView) {
 		return client.Call("Bridge.Disconnect", struct{}{}, &struct{}{})
 	}))
 
+	must(w.Bind("disconnectProfile", func(name string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.DisconnectProfile", name, &struct{}{})
+	}))
+
 	must(w.Bind("getState", func() (*StateReply, error) {
 		client, err := ipcDial()
 		if err != nil {

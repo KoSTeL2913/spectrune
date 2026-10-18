@@ -1,5 +1,6 @@
-// The Spectrune Windows service: owns the one active *Bridge (if any)
-// and exposes it over IPC (see ipc.go) as Connect/Disconnect/State/
+// The Spectrune Windows service: owns the one active *Bridge (if any) —
+// which carries every connected profile's tunnel at once — and exposes
+// it over IPC (see ipc.go) as Connect/Disconnect/DisconnectProfile/State/
 // ListProfiles/SaveProfile/LoadProfile/DeleteProfile. Runs as LocalSystem,
 // installed once via /installservice — mirrors the AmneziaWGManager
 // service's own install pattern (manager/install.go in the client repo),
@@ -28,9 +29,8 @@ const serviceName = "SpectruneService"
 // registers it under the name "Bridge" (so calls are "Bridge.Connect" etc.
 // from the client side).
 type Service struct {
-	mu            sync.Mutex
-	bridge        *Bridge
-	activeProfile string
+	mu     sync.Mutex
+	bridge *Bridge // nil while no profile is connected
 
 	// ipv6CleanupDone is closed once the startup IPv6 firewall safety net
 	// (winService.Execute) has finished. Set once before IPC starts
@@ -39,6 +39,10 @@ type Service struct {
 }
 
 type StateReply struct {
+	// Connected/ProfileName/HandshakeOK describe the first connected
+	// profile only — kept for clients that predate multiple simultaneous
+	// connections (an older GUI/tray still running right after a
+	// self-update). Tunnels is the full list.
 	Connected   bool
 	ProfileName string
 	// HandshakeOK is false while Connected is true but the WireGuard
@@ -48,8 +52,16 @@ type StateReply struct {
 	// a false "it's working" in the UI even when the tunnel was
 	// completely dead.
 	HandshakeOK bool
+
+	// Tunnels lists every connected profile, in connect order.
+	Tunnels []TunnelState
 }
 
+// Connect connects name alongside whatever is already connected (a
+// no-op if name itself already is). Refused when it would clash with a
+// connected profile: a second full-tunnel profile (only one can be "the
+// rest of the traffic"), or the same WireGuard private key (the server
+// can't serve one identity twice — see tunnelPrivateKeyInUse).
 func (s *Service) Connect(name string, _ *struct{}) error {
 	// Waited on before taking s.mu, so State polling isn't blocked
 	// meanwhile.
@@ -58,22 +70,60 @@ func (s *Service) Connect(name string, _ *struct{}) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.bridge != nil {
-		return fmt.Errorf("already connected (profile %q) — disconnect first", s.activeProfile)
+	if s.bridge != nil && s.bridge.tunnel(name) != nil {
+		return nil
 	}
 	cfg, err := loadProfile(name)
 	if err != nil {
 		return fmt.Errorf("loadProfile(%q): %w", name, err)
 	}
-	b := &Bridge{}
-	if err := b.Start(cfg); err != nil {
-		return fmt.Errorf("Start: %w", err)
+	if s.bridge == nil {
+		b, err := startBridge(name, cfg)
+		if err != nil {
+			return fmt.Errorf("Start: %w", err)
+		}
+		s.bridge = b
+		return nil
 	}
-	s.bridge = b
-	s.activeProfile = name
+	if other := s.bridge.tunnelPrivateKeyInUse(cfg.Interface.PrivateKey); other != "" {
+		return fmt.Errorf("profile %q uses the same private key as the connected profile %q — a server can't serve one key twice, give each profile its own key", name, other)
+	}
+	if app, other := s.bridge.appClaimedBy(cfg.Interface.IncludedApps, name); other != "" {
+		return fmt.Errorf("profile %q includes %s, which the connected profile %q already routes — an app can only go through one tunnel at a time", name, app, other)
+	}
+	if len(cfg.Interface.IncludedApps) == 0 {
+		for _, other := range s.bridge.TunnelNames() {
+			if s.bridge.tunnel(other).isFullTunnel() {
+				return fmt.Errorf("profile %q routes all traffic, and so does the connected profile %q — only one such profile can be connected at a time", name, other)
+			}
+		}
+	}
+	if err := s.bridge.AddTunnel(name, cfg); err != nil {
+		return fmt.Errorf("AddTunnel: %w", err)
+	}
 	return nil
 }
 
+// DisconnectProfile disconnects just name, leaving other connected
+// profiles running; the bridge itself goes down with the last one.
+func (s *Service) DisconnectProfile(name string, _ *struct{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bridge == nil {
+		return nil
+	}
+	if s.bridge.RemoveTunnel(name) == 0 {
+		return s.disconnectLocked()
+	}
+	return nil
+}
+
+// connectedLocked reports whether name is currently connected. Requires s.mu.
+func (s *Service) connectedLocked(name string) bool {
+	return s.bridge != nil && s.bridge.tunnel(name) != nil
+}
+
+// Disconnect disconnects every connected profile.
 func (s *Service) Disconnect(_ struct{}, _ *struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,14 +138,11 @@ func (s *Service) disconnectLocked() error {
 	}
 	s.bridge.Stop()
 	s.bridge = nil
-	s.activeProfile = ""
 	return nil
 }
 
 func (s *Service) State(_ struct{}, reply *StateReply) error {
 	s.mu.Lock()
-	reply.Connected = s.bridge != nil
-	reply.ProfileName = s.activeProfile
 	bridge := s.bridge
 	s.mu.Unlock()
 	// HandshakeOK's IpcGet() call runs outside the lock — State is polled
@@ -104,8 +151,17 @@ func (s *Service) State(_ struct{}, reply *StateReply) error {
 	// duration of a device query neither needs nor benefits from that
 	// lock would let frequent polling stall those instead of just this
 	// one read.
-	if bridge != nil {
-		reply.HandshakeOK = bridge.HandshakeOK()
+	if bridge == nil {
+		return nil
+	}
+	reply.Tunnels = bridge.TunnelStates()
+	// A bridge momentarily without tunnels (pass-through) still counts as
+	// connected for old clients, same as before.
+	reply.Connected = true
+	reply.HandshakeOK = true
+	if len(reply.Tunnels) > 0 {
+		reply.ProfileName = reply.Tunnels[0].Name
+		reply.HandshakeOK = reply.Tunnels[0].HandshakeOK
 	}
 	return nil
 }
@@ -142,6 +198,14 @@ func (s *Service) ListProfiles(_ struct{}, reply *[]string) error {
 }
 
 func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.connectedLocked(cfg.Name)
+	if live {
+		if app, other := s.bridge.appClaimedBy(cfg.Interface.IncludedApps, cfg.Name); other != "" {
+			return fmt.Errorf("%s is already routed by the connected profile %q — an app can only go through one tunnel at a time", app, other)
+		}
+	}
 	if err := saveProfile(&cfg); err != nil {
 		return err
 	}
@@ -152,58 +216,17 @@ func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
 	// to mean tearing down and rebuilding the whole adapter/tunnel (and
 	// dropping every other in-flight connection with it) just to change
 	// which apps route through it.
-	s.mu.Lock()
-	bridge := s.bridge
-	isActive := s.bridge != nil && s.activeProfile == cfg.Name
-	s.mu.Unlock()
-	if isActive {
-		bridge.UpdateIncludedApps(cfg.Interface.IncludedApps)
-		bridge.UpdateDomains(resolveDomainLists(cfg.Interface.IncludedDomainLists))
-	}
-
-	// At most one profile can be marked AutoConnect — the whole app only
-	// ever runs one tunnel at a time, so "auto-connect on startup" only
-	// makes sense as a single choice. Enforced here rather than trusting
-	// the GUI to do it, so it holds regardless of how a profile gets
-	// saved (CLI, a future second client, ...).
-	if cfg.Interface.AutoConnect {
-		if err := clearAutoConnectExcept(cfg.Name); err != nil {
-			log.Printf("SaveProfile: clearAutoConnectExcept(%q): %v", cfg.Name, err)
-		}
+	if live {
+		s.bridge.UpdateTunnel(cfg.Name, cfg.Interface.IncludedApps, resolveDomainLists(cfg.Interface.IncludedDomainLists))
 	}
 	return nil
 }
 
-// clearAutoConnectExcept unsets AutoConnect on every saved profile other
-// than keep — see SaveProfile's doc for why only one may have it set.
-func clearAutoConnectExcept(keep string) error {
-	names, err := listProfileNames()
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		if name == keep {
-			continue
-		}
-		cfg, err := loadProfile(name)
-		if err != nil {
-			log.Printf("clearAutoConnectExcept: loadProfile(%q): %v", name, err)
-			continue
-		}
-		if !cfg.Interface.AutoConnect {
-			continue
-		}
-		cfg.Interface.AutoConnect = false
-		if err := saveProfile(cfg); err != nil {
-			log.Printf("clearAutoConnectExcept: saveProfile(%q): %v", name, err)
-		}
-	}
-	return nil
-}
-
-// autoConnectOnStartup looks for exactly one saved profile with
-// AutoConnect enabled and connects to it — mirrors clicking Connect in
-// the GUI, just triggered once at service start instead of by the user.
+// autoConnectOnStartup connects every saved profile with AutoConnect
+// enabled — mirrors clicking Connect in the GUI, just triggered once at
+// service start instead of by the user. Several can be marked now that
+// several can run at once; one that clashes with an earlier one (see
+// Connect) just logs the refusal.
 // Called from winService.Execute in its own goroutine, right after
 // reporting Running to the SCM, since establishing a tunnel can take a
 // moment and shouldn't hold up service startup.
@@ -226,7 +249,6 @@ func (s *Service) autoConnectOnStartup() {
 		if err := s.Connect(name, &struct{}{}); err != nil {
 			log.Printf("autoConnectOnStartup: Connect(%q): %v", name, err)
 		}
-		return
 	}
 }
 
@@ -242,7 +264,7 @@ func (s *Service) LoadProfile(name string, reply *conf.Config) error {
 func (s *Service) DeleteProfile(name string, _ *struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activeProfile == name {
+	if s.connectedLocked(name) {
 		return fmt.Errorf("profile %q is currently connected — disconnect first", name)
 	}
 	return deleteProfile(name)
@@ -256,7 +278,7 @@ type RenameProfileRequest struct {
 }
 
 // RenameProfile moves a saved profile to a new name — refuses while it's
-// the active connection (activeProfile tracking, service.log's own
+// connected (the bridge's tunnel list, service.log's own
 // service.log file, etc. all key off the name; simplest to just require
 // Disconnect first rather than trying to rename a live connection out
 // from under itself) and refuses to silently clobber a different
@@ -267,7 +289,7 @@ type RenameProfileRequest struct {
 func (s *Service) RenameProfile(req RenameProfileRequest, _ *struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activeProfile == req.OldName {
+	if s.connectedLocked(req.OldName) {
 		return fmt.Errorf("profile %q is currently connected — disconnect first", req.OldName)
 	}
 	if !profileNameIsValid(req.NewName) {
@@ -338,24 +360,25 @@ func (s *Service) SaveDomainList(req DomainListSaveRequest, _ *struct{}) error {
 	if err := saveDomainList(req.Name, req.Domains); err != nil {
 		return err
 	}
-	// Live-update any connected profile that has this list enabled —
+	// Live-update every connected profile that has this list enabled —
 	// otherwise editing a list's own domains while it's already toggled
-	// on for the active profile wouldn't take effect until a reconnect.
+	// on for a connected profile wouldn't take effect until a reconnect.
 	s.mu.Lock()
 	bridge := s.bridge
-	name := s.activeProfile
 	s.mu.Unlock()
 	if bridge == nil {
 		return nil
 	}
-	cfg, err := loadProfile(name)
-	if err != nil {
-		return nil
-	}
-	for _, enabled := range cfg.Interface.IncludedDomainLists {
-		if enabled == req.Name {
-			bridge.UpdateDomains(resolveDomainLists(cfg.Interface.IncludedDomainLists))
-			break
+	for _, name := range bridge.TunnelNames() {
+		cfg, err := loadProfile(name)
+		if err != nil {
+			continue
+		}
+		for _, enabled := range cfg.Interface.IncludedDomainLists {
+			if enabled == req.Name {
+				bridge.UpdateDomains(name, resolveDomainLists(cfg.Interface.IncludedDomainLists))
+				break
+			}
 		}
 	}
 	return nil

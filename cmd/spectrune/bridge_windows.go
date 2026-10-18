@@ -108,10 +108,21 @@ type Bridge struct {
 	// our own TUN.
 	realIfaceIndex uint32
 
-	// outTun is our own, separate outbound AmneziaWG tunnel — nil if no
-	// config was supplied (pure pass-through mode, useful for testing the
-	// bridge itself before wiring up a real VPN peer).
-	outTun *outboundTunnel
+	// tunnels are the outbound AmneziaWG tunnels currently connected, in
+	// connect order — one per active profile. Several can run at once
+	// over the same Wintun adapter: each is a self-contained in-memory
+	// netstack, so adding one is just another entry here, not another
+	// adapter. pickTunnel decides which one (if any) carries a given
+	// connection. Empty means pure pass-through (everything relays
+	// direct). Guarded by tunMu: the forwarders read it on every
+	// intercepted connection while Connect/Disconnect edit it.
+	tunMu   sync.RWMutex
+	tunnels []*namedTunnel
+
+	// fullExtras records whether the full-tunnel-only extras (IPv6
+	// default route + firewall block, tunnel DNS on the adapter) are
+	// currently applied — see syncFullTunnelExtras.
+	fullExtras bool
 
 	adapter        *wintun.Adapter
 	session        wintun.Session
@@ -136,8 +147,9 @@ type Bridge struct {
 
 	pumpPacketCount int
 
-	// ipv6RouteAdded records whether Start added a ::/0 IPv6 default route
-	// via the Wintun adapter (full-tunnel mode only). Stop removes it when set.
+	// ipv6RouteAdded records whether a ::/0 IPv6 default route via the
+	// Wintun adapter is in place (full-tunnel mode only) — see
+	// applyFullTunnelExtras/removeFullTunnelExtras.
 	ipv6RouteAdded bool
 
 	// conns tracks every in-flight relayed connection (both TCP and UDP,
@@ -155,44 +167,194 @@ type Bridge struct {
 }
 
 type trackedConn struct {
-	procName  string
-	viaTunnel bool
-	closer    io.Closer
+	procName string
+	dstIP    string
+	tunnel   string // carrying tunnel's profile name, "" for direct
+	closer   io.Closer
 }
 
-// Start brings the bridge up: builds the (optional) outbound AmneziaWG
-// tunnel from cfg, creates the Wintun adapter and gVisor netstack, wires
-// the TCP/UDP forwarders, and makes the Wintun adapter the system default
-// route. cfg may be nil for pure pass-through mode (everything relays
-// direct, useful for testing the capture path alone). On any failure,
-// whatever was already brought up is torn down before returning the error
-// — unlike the old log.Fatalf call sites this replaces, a failed Start
-// here does not exit the process, so it must not leak the adapter/session.
-func (b *Bridge) Start(cfg *conf.Config) error {
+// namedTunnel is one connected profile's outbound tunnel.
+type namedTunnel struct {
+	name string
+	t    *outboundTunnel
+}
+
+// startBridge brings a bridge up with name's tunnel (built from cfg) as
+// its first one — or with none at all when cfg is nil (pure pass-through
+// mode, everything relays direct, useful for testing the capture path
+// alone). The tunnel is built BEFORE the adapter exists: once the
+// Wintun default route is in place, bestOutboundInterface would answer
+// with the Wintun adapter itself, and a tunnel that fails to come up
+// (bad endpoint, ...) shouldn't have touched system routing at all.
+func startBridge(name string, cfg *conf.Config) (*Bridge, error) {
 	realIfaceIndex, err := bestOutboundInterface(netip.MustParseAddr("1.1.1.1"))
 	if err != nil {
-		return fmt.Errorf("bestOutboundInterface: %w (are we even online yet?)", err)
+		return nil, fmt.Errorf("bestOutboundInterface: %w (are we even online yet?)", err)
 	}
-	b.realIfaceIndex = realIfaceIndex
-	log.Printf("real outbound interface index: %d", b.realIfaceIndex)
+	log.Printf("real outbound interface index: %d", realIfaceIndex)
 
+	var outTun *outboundTunnel
 	if cfg != nil {
-		outTun, err := newOutboundTunnel(cfg, realIfaceIndex)
-		if err != nil {
-			return fmt.Errorf("newOutboundTunnel: %w", err)
-		}
-		b.outTun = outTun
-		if len(outTun.includedApps) == 0 {
-			log.Printf("outbound AmneziaWG tunnel up, full-tunnel mode (no app selection, everything routed)")
-		} else {
-			log.Printf("outbound AmneziaWG tunnel up, %d included app(s)", len(outTun.includedApps))
-			for p := range outTun.includedApps {
-				log.Printf("  includedApp: %q", p)
-			}
+		if outTun, err = newOutboundTunnel(cfg, realIfaceIndex); err != nil {
+			return nil, fmt.Errorf("newOutboundTunnel: %w", err)
 		}
 	} else {
 		log.Printf("running in pure pass-through mode, everything relays direct")
 	}
+
+	b := &Bridge{realIfaceIndex: realIfaceIndex}
+	if err := b.Start(); err != nil {
+		if outTun != nil {
+			outTun.close()
+		}
+		return nil, err
+	}
+	if outTun != nil {
+		b.addTunnel(name, outTun)
+	}
+	return b, nil
+}
+
+// AddTunnel connects one more profile alongside the ones already running
+// on this bridge — see the tunnels field doc.
+func (b *Bridge) AddTunnel(name string, cfg *conf.Config) error {
+	outTun, err := newOutboundTunnel(cfg, b.realIfaceIndex)
+	if err != nil {
+		return fmt.Errorf("newOutboundTunnel: %w", err)
+	}
+	b.addTunnel(name, outTun)
+	return nil
+}
+
+func (b *Bridge) addTunnel(name string, outTun *outboundTunnel) {
+	if outTun.isFullTunnel() {
+		log.Printf("tunnel %q up, full-tunnel mode (no app selection, everything else routed)", name)
+	} else {
+		log.Printf("tunnel %q up, %d included app(s)", name, len(outTun.includedApps))
+		for p := range outTun.includedApps {
+			log.Printf("  includedApp: %q", p)
+		}
+	}
+	b.tunMu.Lock()
+	b.tunnels = append(b.tunnels, &namedTunnel{name: name, t: outTun})
+	b.tunMu.Unlock()
+	b.syncFullTunnelExtras()
+	// Connections already open on another path that this tunnel now
+	// claims get closed so the apps reconnect through it — same as
+	// editing a connected profile's app list.
+	b.closeStaleConns()
+}
+
+// RemoveTunnel disconnects one profile, leaving the bridge and any other
+// tunnels running. Returns how many tunnels remain — the caller stops the
+// whole bridge once that's 0.
+func (b *Bridge) RemoveTunnel(name string) int {
+	b.tunMu.Lock()
+	var removed *outboundTunnel
+	for i, nt := range b.tunnels {
+		if nt.name == name {
+			removed = nt.t
+			b.tunnels = append(b.tunnels[:i:i], b.tunnels[i+1:]...)
+			break
+		}
+	}
+	left := len(b.tunnels)
+	b.tunMu.Unlock()
+	if removed == nil {
+		return left
+	}
+	if left > 0 {
+		b.syncFullTunnelExtras()
+		// Everything that was relayed through the removed tunnel no
+		// longer matches it, so this closes exactly those (and anything a
+		// remaining tunnel now picks up instead).
+		b.closeStaleConns()
+	}
+	removed.close()
+	log.Printf("tunnel %q removed, %d still connected", name, left)
+	return left
+}
+
+// TunnelNames returns the connected profiles' names, in connect order.
+func (b *Bridge) TunnelNames() []string {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	names := make([]string, len(b.tunnels))
+	for i, nt := range b.tunnels {
+		names[i] = nt.name
+	}
+	return names
+}
+
+// tunnel returns name's tunnel, or nil if that profile isn't connected.
+func (b *Bridge) tunnel(name string) *outboundTunnel {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.name == name {
+			return nt.t
+		}
+	}
+	return nil
+}
+
+// pickTunnel decides which connected tunnel carries a connection from
+// procName to dstIP, or nil for direct. Split-tunnel profiles (with an
+// app or domain selection) come first, in connect order — so when two of
+// them claim the same app, the one connected first wins. A full-tunnel
+// profile only gets what no split profile claimed, which is what makes
+// "everything via A, but Telegram via B" work.
+func (b *Bridge) pickTunnel(procName, dstIP string) *namedTunnel {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	var full *namedTunnel
+	for _, nt := range b.tunnels {
+		if nt.t.isFullTunnel() {
+			if full == nil {
+				full = nt
+			}
+			continue
+		}
+		if nt.t.matches(procName) || nt.t.matchesDomainIP(dstIP) {
+			return nt
+		}
+	}
+	return full
+}
+
+// observeDNSResponse hands a DNS response to every connected tunnel, each
+// of which learns the IPs for its own domain lists.
+func (b *Bridge) observeDNSResponse(payload []byte) {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		nt.t.observeDNSResponse(payload)
+	}
+}
+
+// fullTunnelDNS returns the DNS servers of the first connected full-tunnel
+// profile, or nil if none is connected.
+func (b *Bridge) fullTunnelDNS() ([]netip.Addr, bool) {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.t.isFullTunnel() {
+			return nt.t.dns, true
+		}
+	}
+	return nil, false
+}
+
+// Start brings the bridge itself up: creates the Wintun adapter and
+// gVisor netstack, wires the TCP/UDP forwarders, and makes the Wintun
+// adapter the system default route. Tunnels are added separately (see
+// startBridge/AddTunnel). b.realIfaceIndex must already be set. On any
+// failure, whatever was already brought up is torn down before returning
+// the error — unlike the old log.Fatalf call sites this replaces, a
+// failed Start here does not exit the process, so it must not leak the
+// adapter/session.
+func (b *Bridge) Start() error {
+	var err error
 
 	// A stale adapter from an unclean previous shutdown (a crash, a
 	// force-killed process, or the whole machine losing power/being
@@ -337,99 +499,118 @@ func (b *Bridge) Start(cfg *conf.Config) error {
 		return fmt.Errorf("configureWindowsInterface: %w", err)
 	}
 
-	// IPv6 leak guard: configureWindowsInterface only points the IPv4
-	// default route at the Wintun adapter, so a network with real IPv6
-	// connectivity keeps routing IPv6 straight out the physical adapter —
-	// never reaching this process's capture/relay logic at all, matched
-	// or not. Confirmed live 2026-09-03: Edge showed the real (non-VPN)
-	// IP on an IPv6-capable checker even though its IPv4 traffic was
-	// correctly matched and tunneled. A per-adapter NetAdapterBinding
-	// disable was tried first but wasn't reliable enough — traffic can
-	// leak via a tunnel/pseudo adapter (Teredo, 6to4, a VPN's own virtual
-	// NIC) that Get-NetAdapter/bestOutboundInterface never singles out. A
-	// blanket outbound firewall block for the entire IPv6 address range
-	// is authoritative regardless of which interface would've carried it.
-	//
-	// Only applied in full-tunnel mode (no app selection) — "route
-	// everything" is the only case this leak actually contradicts user
-	// intent. In split-tunnel mode the user has already said "just these
-	// apps go through the tunnel, everything else stays direct," so an
-	// app that was never included going out over IPv6 isn't a leak at
-	// all, it's exactly what was asked for — but the blanket block
-	// doesn't know the difference and kills IPv6 for literally every
-	// other process on the machine too. Confirmed live 2026-09-12: this
-	// broke an unrelated AnyDesk session (AnyDesk prefers IPv6 when
-	// available) on a split-tunnel profile that never included it.
-	// Best-effort — a failure here shouldn't block an otherwise-working
-	// connection.
-	if b.outTun == nil || len(b.outTun.includedApps) == 0 {
-		log.Printf("full-tunnel/pass-through mode: blocking outbound IPv6 to prevent it bypassing the tunnel")
-
-		// Add IPv6 default route via Wintun SYNCHRONOUSLY — a plain netsh
-		// call takes milliseconds, unlike the WFP firewall block below.
-		// Without this, Windows routes global IPv6 traffic through the
-		// physical adapter (bypassing our Wintun bridge entirely) until the
-		// WFP rule fires ~10 s later. During that window a browser's IPv6
-		// TCP/TLS attempt to a DPI-blocked site (e.g. 2ip.io blocked by РКН)
-		// results in a mid-handshake RST — reported as ERR_SSL_PROTOCOL_ERROR
-		// — because the TLS ClientHello exits unencrypted through the real
-		// adapter before the VPN tunnel can carry it. Once in place, all
-		// IPv6 SYNs enter gVisor and are RST'd immediately by handleForwarded
-		// (WireGuard is IPv4-only), so Chrome's Happy Eyeballs retries on
-		// IPv4 via the tunnel instead of exposing the SNI to DPI.
-		if out, err := exec.Command("netsh", "interface", "ipv6", "add", "route",
-			"::/0", alias, "metric=1").CombinedOutput(); err != nil {
-			log.Printf("warning: could not add IPv6 default route via Wintun: %v (%s)", err, out)
-		} else {
-			log.Printf("IPv6 default route via Wintun added (adapter %s)", alias)
-			b.ipv6RouteAdded = true
-		}
-
-		// WFP firewall block is kept as belt-and-suspenders for Teredo/6to4
-		// pseudo-adapters that tunnel IPv6 inside IPv4 UDP and bypass the
-		// ::/0 route entirely (Get-NetAdapter never singles them out, so only
-		// a blanket outbound WFP rule covers them reliably).
-		// Genuinely best-effort (per the doc above) — run it in the
-		// background rather than blocking Start()/the Connect RPC on it.
-		// runPowerShellWithRetry can now take several seconds on a slow
-		// or WMI-flaky machine (confirmed live 2026-09-15: retries here
-		// made a real disconnect feel frozen for several seconds — see
-		// unblockIPv6Firewall's call in Stop() for the matching fix),
-		// and nothing about the tunnel actually depends on this
-		// finishing before Connect replies.
-		go func() {
-			if err := blockIPv6Firewall(b.realIfaceIndex); err != nil {
-				log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
-			} else {
-				log.Printf("outbound IPv6 blocked successfully")
-			}
-		}()
-
-		// Configure DNS on the Wintun adapter so Windows stops using the
-		// physical adapter's DNS (often a router IPv6 link-local like
-		// fe80::..., unreachable through the WireGuard tunnel) and uses a
-		// real resolver that flows through the tunnel instead. Without
-		// this, all hostname resolution fails in full-tunnel mode on
-		// machines where the router only advertises an IPv6 link-local
-		// DNS server (common on modern home routers with SLAAC).
-		var tunDNS []netip.Addr
-		if b.outTun != nil {
-			tunDNS = b.outTun.dns
-		}
-		if len(tunDNS) == 0 {
-			tunDNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
-		}
-		configureWintunDNS(alias, tunDNS)
-	}
-
-	if b.outTun != nil && len(b.outTun.includedApps) > 0 {
-		log.Printf("Bridge active. Selected apps -> VPN tunnel, everything else -> direct.")
-	} else if b.outTun != nil {
-		log.Printf("Bridge active. Full tunnel: everything -> VPN tunnel.")
-	} else {
-		log.Printf("Bridge active in pass-through mode (no config.conf).")
-	}
+	log.Printf("Bridge active.")
 	return nil
+}
+
+// syncFullTunnelExtras applies or removes the full-tunnel-only extras
+// (see applyFullTunnelExtras) to match whether any connected profile is
+// a full-tunnel one right now. Called after every tunnel add/remove and
+// after a connected profile's app selection is edited (which can turn it
+// from split into full or back).
+func (b *Bridge) syncFullTunnelExtras() {
+	dns, needed := b.fullTunnelDNS()
+	b.tunMu.Lock()
+	applied := b.fullExtras
+	b.fullExtras = needed
+	b.tunMu.Unlock()
+	switch {
+	case needed && !applied:
+		b.applyFullTunnelExtras(dns)
+	case !needed && applied:
+		b.removeFullTunnelExtras()
+	}
+}
+
+// applyFullTunnelExtras sets up what only a full-tunnel profile needs.
+//
+// IPv6 leak guard: configureWindowsInterface only points the IPv4
+// default route at the Wintun adapter, so a network with real IPv6
+// connectivity keeps routing IPv6 straight out the physical adapter —
+// never reaching this process's capture/relay logic at all, matched
+// or not. Confirmed live 2026-09-03: Edge showed the real (non-VPN)
+// IP on an IPv6-capable checker even though its IPv4 traffic was
+// correctly matched and tunneled. A per-adapter NetAdapterBinding
+// disable was tried first but wasn't reliable enough — traffic can
+// leak via a tunnel/pseudo adapter (Teredo, 6to4, a VPN's own virtual
+// NIC) that Get-NetAdapter/bestOutboundInterface never singles out. A
+// blanket outbound firewall block for the entire IPv6 address range
+// is authoritative regardless of which interface would've carried it.
+//
+// Only applied in full-tunnel mode (no app selection) — "route
+// everything" is the only case this leak actually contradicts user
+// intent. In split-tunnel mode the user has already said "just these
+// apps go through the tunnel, everything else stays direct," so an
+// app that was never included going out over IPv6 isn't a leak at
+// all, it's exactly what was asked for — but the blanket block
+// doesn't know the difference and kills IPv6 for literally every
+// other process on the machine too. Confirmed live 2026-09-12: this
+// broke an unrelated AnyDesk session (AnyDesk prefers IPv6 when
+// available) on a split-tunnel profile that never included it.
+// Best-effort — a failure here shouldn't block an otherwise-working
+// connection.
+func (b *Bridge) applyFullTunnelExtras(tunDNS []netip.Addr) {
+	log.Printf("full-tunnel mode: blocking outbound IPv6 to prevent it bypassing the tunnel")
+
+	// Add IPv6 default route via Wintun SYNCHRONOUSLY — a plain netsh
+	// call takes milliseconds, unlike the WFP firewall block below.
+	// Without this, Windows routes global IPv6 traffic through the
+	// physical adapter (bypassing our Wintun bridge entirely) until the
+	// WFP rule fires ~10 s later. During that window a browser's IPv6
+	// TCP/TLS attempt to a DPI-blocked site (e.g. 2ip.io blocked by РКН)
+	// results in a mid-handshake RST — reported as ERR_SSL_PROTOCOL_ERROR
+	// — because the TLS ClientHello exits unencrypted through the real
+	// adapter before the VPN tunnel can carry it. Once in place, all
+	// IPv6 SYNs enter gVisor and are RST'd immediately by handleForwarded
+	// (WireGuard is IPv4-only), so Chrome's Happy Eyeballs retries on
+	// IPv4 via the tunnel instead of exposing the SNI to DPI.
+	if out, err := exec.Command("netsh", "interface", "ipv6", "add", "route",
+		"::/0", b.ifaceAlias, "metric=1").CombinedOutput(); err != nil {
+		log.Printf("warning: could not add IPv6 default route via Wintun: %v (%s)", err, out)
+	} else {
+		log.Printf("IPv6 default route via Wintun added (adapter %s)", b.ifaceAlias)
+		b.ipv6RouteAdded = true
+	}
+
+	// WFP firewall block is kept as belt-and-suspenders for Teredo/6to4
+	// pseudo-adapters that tunnel IPv6 inside IPv4 UDP and bypass the
+	// ::/0 route entirely (Get-NetAdapter never singles them out, so only
+	// a blanket outbound WFP rule covers them reliably).
+	// Genuinely best-effort (per the doc above) — run it in the
+	// background rather than blocking Start()/the Connect RPC on it.
+	// runPowerShellWithRetry can now take several seconds on a slow
+	// or WMI-flaky machine (confirmed live 2026-09-15: retries here
+	// made a real disconnect feel frozen for several seconds — see
+	// unblockIPv6Firewall's call in Stop() for the matching fix),
+	// and nothing about the tunnel actually depends on this
+	// finishing before Connect replies.
+	setIPv6Block(true, b.realIfaceIndex)
+
+	// Configure DNS on the Wintun adapter so Windows stops using the
+	// physical adapter's DNS (often a router IPv6 link-local like
+	// fe80::..., unreachable through the WireGuard tunnel) and uses a
+	// real resolver that flows through the tunnel instead. Without
+	// this, all hostname resolution fails in full-tunnel mode on
+	// machines where the router only advertises an IPv6 link-local
+	// DNS server (common on modern home routers with SLAAC).
+	if len(tunDNS) == 0 {
+		tunDNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
+	}
+	configureWintunDNS(b.ifaceAlias, tunDNS)
+}
+
+// removeFullTunnelExtras undoes applyFullTunnelExtras while the bridge
+// itself keeps running (the last full-tunnel profile disconnected, split
+// ones remain). Stop does the same cleanup on its own for a full
+// teardown.
+func (b *Bridge) removeFullTunnelExtras() {
+	log.Printf("no full-tunnel profile connected any more: restoring IPv6 and adapter DNS")
+	if b.ipv6RouteAdded {
+		exec.Command("netsh", "interface", "ipv6", "delete", "route", "::/0", b.ifaceAlias).Run()
+		b.ipv6RouteAdded = false
+	}
+	resetWintunDNS(b.ifaceAlias)
+	setIPv6Block(false, b.realIfaceIndex)
 }
 
 // failStart tears down whatever partial state Start already created
@@ -447,49 +628,86 @@ func (b *Bridge) failStart(err error) error {
 	return err
 }
 
-// UpdateIncludedApps swaps the live app selection on an already-running
-// tunnel — see Service.SaveProfile (service.go), which calls this when the
-// profile being saved is the one currently connected. No-op in
-// pass-through mode (no config.conf, b.outTun == nil). Force-closes any
-// already-open connection whose path no longer matches the new selection
-// (see the conns field doc) so apps pick up the change without needing a
-// full restart.
-func (b *Bridge) UpdateIncludedApps(apps []string) {
-	if b.outTun == nil {
+// UpdateTunnel swaps the live app and domain selection of name's
+// already-running tunnel — see Service.SaveProfile, which calls this when
+// the profile being saved is connected. No-op if it isn't. Force-closes
+// any already-open connection whose path no longer matches the new
+// selection (see the conns field doc) so apps pick up the change without
+// needing a full restart.
+func (b *Bridge) UpdateTunnel(name string, apps, domains []string) {
+	t := b.tunnel(name)
+	if t == nil {
 		return
 	}
-	b.outTun.updateIncludedApps(apps)
+	t.updateIncludedApps(apps)
+	t.updateDomains(domains)
+	b.syncFullTunnelExtras()
 	b.closeStaleConns()
 }
 
-// UpdateDomains swaps the live domain-list selection on an already-
-// running tunnel — same trigger (Service.SaveProfile) and reasoning as
-// UpdateIncludedApps, just for domain-list routing instead of app-based.
-// Takes the already-resolved flat domain slice, not list names — the
-// caller (service_windows.go) does that resolution the same way
-// Connect/newOutboundTunnel do.
-func (b *Bridge) UpdateDomains(domains []string) {
-	if b.outTun == nil {
-		return
+// UpdateDomains swaps only the domain selection of name's running tunnel
+// — see Service.SaveDomainList.
+func (b *Bridge) UpdateDomains(name string, domains []string) {
+	if t := b.tunnel(name); t != nil {
+		t.updateDomains(domains)
 	}
-	b.outTun.updateDomains(domains)
 }
 
-// HandshakeOK reports whether the outbound tunnel has ever completed a
-// WireGuard handshake with its peer — see outboundTunnel.hasHandshake's
-// doc. True in pass-through mode (b.outTun == nil, no config.conf), since
-// there's no peer to hand-shake with in the first place and that mode was
-// never claiming to be a real VPN connection.
-func (b *Bridge) HandshakeOK() bool {
-	if b.outTun == nil {
-		return true
+// TunnelState is one connected profile's status, as reported to the GUI.
+type TunnelState struct {
+	Name string
+	// HandshakeOK — see outboundTunnel.hasHandshake's doc.
+	HandshakeOK bool
+}
+
+// TunnelStates reports every connected tunnel's handshake status, in
+// connect order. The IpcGet queries run outside tunMu.
+func (b *Bridge) TunnelStates() []TunnelState {
+	b.tunMu.RLock()
+	tunnels := append([]*namedTunnel(nil), b.tunnels...)
+	b.tunMu.RUnlock()
+	states := make([]TunnelState, len(tunnels))
+	for i, nt := range tunnels {
+		states[i] = TunnelState{Name: nt.name, HandshakeOK: nt.t.hasHandshake()}
 	}
-	return b.outTun.hasHandshake()
+	return states
+}
+
+// appClaimedBy returns one of apps that a connected profile other than
+// except already routes, and that profile's name ("" if none) — one app
+// goes through one tunnel at a time, so the GUI hides those apps from
+// other profiles' pickers and the service refuses the overlap.
+func (b *Bridge) appClaimedBy(apps []string, except string) (app, profile string) {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.name == except || nt.t.isFullTunnel() {
+			continue
+		}
+		if a := nt.t.sharedApp(apps); a != "" {
+			return a, nt.name
+		}
+	}
+	return "", ""
+}
+
+// tunnelPrivateKeyInUse reports which connected profile (if any) already
+// uses key — a WireGuard server can't serve two simultaneous sessions
+// for one key, so a second profile with it would silently break both.
+func (b *Bridge) tunnelPrivateKeyInUse(key conf.Key) string {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.t.privateKey == key {
+			return nt.name
+		}
+	}
+	return ""
 }
 
 // trackConn registers a just-opened relayed connection and returns an id
 // to hand back to untrackConn once it finishes.
-func (b *Bridge) trackConn(procName string, viaTunnel bool, c io.Closer) uint64 {
+func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer) uint64 {
 	b.connsMu.Lock()
 	defer b.connsMu.Unlock()
 	if b.conns == nil {
@@ -497,7 +715,7 @@ func (b *Bridge) trackConn(procName string, viaTunnel bool, c io.Closer) uint64 
 	}
 	b.nextConnID++
 	id := b.nextConnID
-	b.conns[id] = &trackedConn{procName: procName, viaTunnel: viaTunnel, closer: c}
+	b.conns[id] = &trackedConn{procName: procName, dstIP: dstIP, tunnel: tunnel, closer: c}
 	return id
 }
 
@@ -508,15 +726,20 @@ func (b *Bridge) untrackConn(id uint64) {
 }
 
 // closeStaleConns force-closes every tracked connection whose recorded
-// path (direct vs tunnel) disagrees with what outTun.matches would decide
-// right now — called right after an app-selection update. Closing here
+// path (direct, or which tunnel) disagrees with what pickTunnel would
+// decide right now — called right after an app-selection update or a
+// tunnel being added/removed. Closing here
 // only closes the app-facing side; the relay goroutine's own deferred
 // cleanup tears down the remote leg and untracks it as it unwinds.
 func (b *Bridge) closeStaleConns() {
 	b.connsMu.Lock()
 	var stale []io.Closer
 	for _, c := range b.conns {
-		if b.outTun.matches(c.procName) != c.viaTunnel {
+		want := ""
+		if nt := b.pickTunnel(c.procName, c.dstIP); nt != nil {
+			want = nt.name
+		}
+		if want != c.tunnel {
 			stale = append(stale, c.closer)
 		}
 	}
@@ -525,7 +748,7 @@ func (b *Bridge) closeStaleConns() {
 		c.Close()
 	}
 	if len(stale) > 0 {
-		log.Printf("closed %d stale connection(s) after app-selection change", len(stale))
+		log.Printf("closed %d stale connection(s) after a routing change", len(stale))
 	}
 }
 
@@ -552,11 +775,7 @@ func (b *Bridge) Stop() {
 	// 2026-09-15 ("нажал кнопку отключить и он зависает"). If the whole
 	// process exits before this finishes, the next launch's startup
 	// safety net (service_windows.go) removes any rule left behind.
-	go func() {
-		if err := unblockIPv6Firewall(b.realIfaceIndex); err != nil {
-			log.Printf("warning: could not remove outbound IPv6 block: %v", err)
-		}
-	}()
+	setIPv6Block(false, b.realIfaceIndex)
 
 	// Stop both pump goroutines and WAIT for them to actually return
 	// before touching the session/adapter — closing either while a pump
@@ -565,7 +784,9 @@ func (b *Bridge) Stop() {
 	// ReceivePacket, racing with adapter.Close() on another goroutine).
 	// Same pattern amneziawg-go's own tun_windows.go Close() uses.
 	b.closeFlag.Store(true)
-	windows.SetEvent(b.readWait)
+	if b.readWait != 0 {
+		windows.SetEvent(b.readWait)
+	}
 	if b.stopStackPump != nil {
 		b.stopStackPump()
 	}
@@ -575,6 +796,13 @@ func (b *Bridge) Stop() {
 	}
 	if b.adapter != nil {
 		b.adapter.Close()
+	}
+	b.tunMu.Lock()
+	tunnels := b.tunnels
+	b.tunnels = nil
+	b.tunMu.Unlock()
+	for _, nt := range tunnels {
+		nt.t.close()
 	}
 }
 
@@ -611,6 +839,42 @@ func runPowerShellWithRetry(script string) (string, error) {
 		}
 	}
 	return string(out), err
+}
+
+// ipv6BlockWant/ipv6BlockMu order the background IPv6 firewall block/
+// unblock runs (setIPv6Block). Each takes several seconds of PowerShell,
+// so a full-tunnel profile disconnected right after connecting used to
+// have its unblock finish BEFORE the still-running block, leaving IPv6
+// blocked machine-wide with only split profiles (or nothing) connected —
+// found live 2026-10-18 testing several simultaneous profiles.
+var (
+	ipv6BlockMu   sync.Mutex
+	ipv6BlockWant atomic.Bool
+)
+
+// setIPv6Block applies (want) or removes the outbound IPv6 block in the
+// background. A run that a later call has already overridden is skipped,
+// so whatever was asked for last is what ends up in place.
+func setIPv6Block(want bool, ifaceIndex uint32) {
+	ipv6BlockWant.Store(want)
+	go func() {
+		ipv6BlockMu.Lock()
+		defer ipv6BlockMu.Unlock()
+		if ipv6BlockWant.Load() != want {
+			return
+		}
+		if !want {
+			if err := unblockIPv6Firewall(ifaceIndex); err != nil {
+				log.Printf("warning: could not remove outbound IPv6 block: %v", err)
+			}
+			return
+		}
+		if err := blockIPv6Firewall(ifaceIndex); err != nil {
+			log.Printf("warning: could not block outbound IPv6 (possible IPv6 leak): %v", err)
+		} else {
+			log.Printf("outbound IPv6 blocked successfully")
+		}
+	}()
 }
 
 // blockIPv6Firewall blocks all outbound IPv6 on the real outbound interface.
@@ -760,9 +1024,13 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	local := gonet.NewTCPConn(&wq, endpoint)
 
-	if int(pid) != os.Getpid() && (b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String())) {
-		log.Printf("  -> TUNNEL (matched %s)", procName)
-		go b.relayViaTunnel(local, id.LocalAddress.String(), id.LocalPort, procName)
+	var nt *namedTunnel
+	if int(pid) != os.Getpid() {
+		nt = b.pickTunnel(procName, id.LocalAddress.String())
+	}
+	if nt != nil {
+		log.Printf("  -> TUNNEL %q (matched %s)", nt.name, procName)
+		go b.relayViaTunnel(nt, local, id.LocalAddress.String(), id.LocalPort, procName)
 	} else {
 		log.Printf("  -> direct")
 		go b.relayDirect(local, dstAddr, id.LocalPort, procName)
@@ -805,20 +1073,24 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 	// lookup itself).
 	var onResponse func([]byte)
 	if id.LocalPort == 53 {
-		onResponse = b.outTun.observeDNSResponse
+		onResponse = b.observeDNSResponse
 	}
 
-	if int(pid) != os.Getpid() && (b.outTun.matches(procName) || b.outTun.matchesDomainIP(id.LocalAddress.String())) {
-		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL", appAddr, dstAddr, pid, procName)
-		go b.relayUDP(local, procName, true, func() (net.Conn, error) {
+	var nt *namedTunnel
+	if int(pid) != os.Getpid() {
+		nt = b.pickTunnel(procName, id.LocalAddress.String())
+	}
+	if nt != nil {
+		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL %q", appAddr, dstAddr, pid, procName, nt.name)
+		go b.relayUDP(local, procName, id.LocalAddress.String(), nt.name, func() (net.Conn, error) {
 			addr, err := netip.ParseAddr(id.LocalAddress.String())
 			if err != nil {
 				return nil, err
 			}
-			return b.outTun.dialUDP(netip.AddrPortFrom(addr, id.LocalPort))
+			return nt.t.dialUDP(netip.AddrPortFrom(addr, id.LocalPort))
 		}, onResponse)
 	} else {
-		go b.relayUDP(local, procName, false, func() (net.Conn, error) {
+		go b.relayUDP(local, procName, id.LocalAddress.String(), "", func() (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second, Control: b.bindToRealIface}
 			return d.Dial("udp4", dstAddr)
 		}, onResponse)
@@ -834,11 +1106,11 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 // datagram before it's forwarded — used only for DNS connections
 // (destination port 53), to passively learn domain->IP associations for
 // domain-list routing (see outboundTunnel.observeDNSResponse). Called
-// regardless of viaTunnel: an app that isn't itself included can still
+// regardless of which path carries it: an app that isn't itself included can still
 // resolve a domain that's in an enabled list, and that resolution needs
 // to be observed no matter which path carried the query.
-func (b *Bridge) relayUDP(local *gonet.UDPConn, procName string, viaTunnel bool, dial func() (net.Conn, error), onResponse func([]byte)) {
-	connID := b.trackConn(procName, viaTunnel, local)
+func (b *Bridge) relayUDP(local *gonet.UDPConn, procName, dstIP, tunnel string, dial func() (net.Conn, error), onResponse func([]byte)) {
+	connID := b.trackConn(procName, dstIP, tunnel, local)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	remote, err := dial()
@@ -914,8 +1186,8 @@ func (s *dnsTCPSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint16, procName string) {
-	connID := b.trackConn(procName, true, local)
+func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP string, dstPort uint16, procName string) {
+	connID := b.trackConn(procName, dstIP, nt.name, local)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	addr, err := netip.ParseAddr(dstIP)
@@ -925,7 +1197,7 @@ func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	remote, err := b.outTun.dial(ctx, netip.AddrPortFrom(addr, dstPort))
+	remote, err := nt.t.dial(ctx, netip.AddrPortFrom(addr, dstPort))
 	if err != nil {
 		log.Printf("  relayViaTunnel: dial %s:%d via tunnel FAILED: %v", dstIP, dstPort, err)
 		return
@@ -935,7 +1207,7 @@ func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint
 
 	var src io.Reader = remote
 	if dstPort == 53 {
-		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.outTun.observeDNSResponse})
+		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.observeDNSResponse})
 	}
 
 	done := make(chan struct{}, 2)
@@ -948,7 +1220,8 @@ func (b *Bridge) relayViaTunnel(local *gonet.TCPConn, dstIP string, dstPort uint
 // interface (bypassing our own default route via IP_UNICAST_IF), and
 // pipes bytes both ways. This is the "not included" path.
 func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint16, procName string) {
-	connID := b.trackConn(procName, false, local)
+	dstIP, _, _ := net.SplitHostPort(dstAddr)
+	connID := b.trackConn(procName, dstIP, "", local)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	log.Printf("  relayDirect: dialing %s via iface %d", dstAddr, b.realIfaceIndex)
@@ -977,7 +1250,7 @@ func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint1
 
 	var src io.Reader = remote
 	if dstPort == 53 {
-		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.outTun.observeDNSResponse})
+		src = io.TeeReader(remote, &dnsTCPSink{onMessage: b.observeDNSResponse})
 	}
 
 	done := make(chan struct{}, 2)

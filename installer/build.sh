@@ -32,7 +32,7 @@ sed -i -E \
 	cmd/spectrune/resources.rc
 (cd cmd/spectrune && x86_64-w64-mingw32-windres resources.rc -O coff -o resources_amd64.syso)
 
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags=-H=windowsgui -o spectrune.exe ./cmd/spectrune
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-H=windowsgui ${EXTRA_LDFLAGS:-}" -o spectrune.exe ./cmd/spectrune
 
 if ! file spectrune.exe | grep -q '(GUI)'; then
 	echo "spectrune.exe is not a GUI-subsystem exe:" >&2
