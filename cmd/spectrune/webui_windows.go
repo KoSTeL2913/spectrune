@@ -280,6 +280,15 @@ func runGUI(retryMutex bool) {
 
 	registerForRestart()
 	repairAutostartEntry()
+	go func() {
+		repairPinnedShortcutIcons()
+		// A GUI relaunched mid-upgrade starts before the old product's
+		// removal deletes its icon folder (RemoveExistingProducts runs
+		// after InstallExecute, see spectrune.wxs), so that first pass
+		// still sees the pin's icon as valid — look once more later.
+		time.Sleep(3 * time.Minute)
+		repairPinnedShortcutIcons()
+	}()
 
 	// Created off screen and centered once the page has painted (uiReady
 	// below), so the window never shows as a blank white box first.
