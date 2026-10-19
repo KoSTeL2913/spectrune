@@ -29,6 +29,10 @@ type StateReply struct {
 	Connected   bool
 	ProfileName string
 	HandshakeOK bool
+	// RxBytes/TxBytes/Since: traffic totals and connect time (unix
+	// seconds), for the GUI's speed and timer readouts.
+	RxBytes, TxBytes uint64
+	Since            int64
 }
 
 func (s *Service) Connect(name string, _ *struct{}) error {
@@ -73,7 +77,8 @@ func (s *Service) State(_ struct{}, reply *StateReply) error {
 	bridge := s.bridge
 	s.mu.Unlock()
 	if bridge != nil {
-		reply.HandshakeOK = bridge.HandshakeOK()
+		reply.HandshakeOK, reply.RxBytes, reply.TxBytes = bridge.Stats()
+		reply.Since = bridge.since.Unix()
 	}
 	return nil
 }

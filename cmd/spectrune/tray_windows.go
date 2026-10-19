@@ -132,6 +132,14 @@ func hideToTrayOnClose(hwnd uintptr) {
 			procShowWindow.Call(hwnd, swHide)
 			return 0
 		}
+		switch {
+		case msg == wmShowWindow:
+			notifyMainWindowVisible(wparam != 0)
+		case msg == wmSize && wparam == sizeMinimized:
+			notifyMainWindowVisible(false)
+		case msg == wmSize && (wparam == sizeRestored || wparam == sizeMaximized):
+			notifyMainWindowVisible(true)
+		}
 		if msg == wmGetMinMaxInfo {
 			mmi := (*minMaxInfo)(unsafe.Pointer(lparam))
 			mmi.PtMinTrackSize.X, mmi.PtMinTrackSize.Y = minTrackSize(hwnd)
@@ -144,10 +152,33 @@ func hideToTrayOnClose(hwnd uintptr) {
 	origMainWndProc = prev
 }
 
+// onMainWindowVisible is set by runGUI to tell the page whether the
+// window can be seen: WebView2 keeps rendering (and animating) a window
+// that's hidden to the tray or minimized, so the page pauses its
+// animations itself. mainWindowVisible dedupes, since WM_SIZE fires
+// continuously while the user drags the window's edge.
+var (
+	onMainWindowVisible func(visible bool)
+	mainWindowVisible   = true
+)
+
+func notifyMainWindowVisible(visible bool) {
+	if visible == mainWindowVisible || onMainWindowVisible == nil {
+		return
+	}
+	mainWindowVisible = visible
+	onMainWindowVisible(visible)
+}
+
 const (
 	wmDestroy       = 0x0002
+	wmSize          = 0x0005
 	wmClose         = 0x0010
+	wmShowWindow    = 0x0018
 	wmGetMinMaxInfo = 0x0024
+	sizeRestored    = 0
+	sizeMinimized   = 1
+	sizeMaximized   = 2
 	wmCommand       = 0x0111
 	wmApp           = 0x8000
 	// Distinct from go-webview2's own WM_APP (0x8000) use on its window —

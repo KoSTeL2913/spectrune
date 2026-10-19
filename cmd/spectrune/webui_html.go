@@ -26,488 +26,808 @@ const webUIHTML = `<!DOCTYPE html>
     /* --grad/--accent/--accent-dark are set at runtime by applyTheme() —
        see the theme picker script below. These are just the fallback
        values before JS runs. */
-    --grad: linear-gradient(135deg, #7a5cff 0%, #ff3ea5 100%);
-    --accent: #7a5cff;
-    --accent-dark: #ff3ea5;
-    --ink: #eef0f8;
-    --muted: #9693ad;
-    --border: #322f47;
-    --card: #1a1826;
-    --input-bg: #14121e;
-    --chip-bg: #221f33;
-    --chip-hover: #2b2843;
-    --selected-bg: #2a2545;
-    --page-bg-1: #241f3d;
-    --page-bg-2: #2b2140;
-    --page-base: #100e19;
-    --err-fg: #ff9bbd;
-    --err-bg: #3a1a2c;
-    --err-border: #5c2540;
-    --scroll-thumb: #3a3850;
-    --scroll-thumb-hover: #4a4766;
-    --radius: 10px;
-    --shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.55);
+    --grad: linear-gradient(135deg, #8b3dff 0%, #ff2d55 100%);
+    --accent: #8b3dff;
+    --accent-dark: #ff2d55;
+    --ink: #f1f0f8;
+    --muted: #9b98b0;
+    --faint: #6d6a82;
+    --page-base: #0d0c14;
+    --surface: #17161f;
+    --surface-2: #1e1d29;
+    --surface-3: #282637;
+    --border: rgba(255, 255, 255, .07);
+    --border-strong: rgba(255, 255, 255, .14);
+    --input-bg: #111019;
+    --ok: #2ee6a0;
+    --ok-ink: #45e9ad;
+    --warn: #f5b83d;
+    --bad: #ff5d6c;
+    --err-fg: #ffa3b4;
+    --err-bg: rgba(255, 93, 108, .1);
+    --err-border: rgba(255, 93, 108, .28);
+    --scroll-thumb: rgba(255, 255, 255, .12);
+    --scroll-thumb-hover: rgba(255, 255, 255, .22);
+    --radius: 14px;
+    --shadow: 0 18px 40px -18px rgba(0, 0, 0, .7);
+    --aurora: .2;
+    /* Older names, still used by a few inline styles below. */
+    --card: var(--surface);
+    --chip-bg: var(--surface-2);
+    --chip-hover: var(--surface-3);
   }
   :root.light {
     color-scheme: light;
-    --ink: #1c1b29;
-    --muted: #6b6980;
-    --border: #e3e1ed;
-    --card: #ffffff;
-    --input-bg: #fbfbfd;
-    --chip-bg: #f4f3fa;
-    --chip-hover: #eae7f7;
-    --selected-bg: #f1edff;
-    --page-bg-1: #eef0fb;
-    --page-bg-2: #f7eef7;
-    --page-base: #f4f4fa;
-    --err-fg: #d1275a;
-    --err-bg: #fdeef3;
-    --err-border: #f7d0de;
-    --scroll-thumb: #d8d6e6;
-    --scroll-thumb-hover: #c3c0da;
-    --shadow: 0 10px 30px -14px rgba(56, 41, 120, 0.28);
+    --ink: #17161f;
+    --muted: #686679;
+    --faint: #9997aa;
+    --page-base: #f3f3f8;
+    --surface: #ffffff;
+    --surface-2: #f5f4fa;
+    --surface-3: #ebe9f4;
+    --border: rgba(24, 20, 50, .08);
+    --border-strong: rgba(24, 20, 50, .16);
+    --input-bg: #fafafd;
+    --ok: #12b77a;
+    --ok-ink: #0d9463;
+    --warn: #d8960f;
+    --bad: #e5384a;
+    --err-fg: #c81e45;
+    --err-bg: #fdeef2;
+    --err-border: #f7cfda;
+    --scroll-thumb: rgba(24, 20, 50, .14);
+    --scroll-thumb-hover: rgba(24, 20, 50, .26);
+    --shadow: 0 16px 36px -18px rgba(56, 41, 120, .3);
+    --aurora: .13;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    margin: 0; padding: 22px 18px; color: var(--ink);
-    background: radial-gradient(circle at 15% 0%, var(--page-bg-1), transparent 55%),
-                radial-gradient(circle at 100% 100%, var(--page-bg-2), transparent 45%),
-                var(--page-base);
-    font-family: "Segoe UI", sans-serif; font-size: 14px;
+    margin: 0; padding: 0; color: var(--ink);
+    /* The accent tints the page itself (two soft glows), so picking a
+       theme color recolors the whole window, not just the buttons. */
+    background:
+      radial-gradient(120% 70% at 0% 0%, color-mix(in srgb, var(--accent) calc(var(--aurora) * 100%), transparent), transparent 60%),
+      radial-gradient(90% 60% at 100% 100%, color-mix(in srgb, var(--accent-dark) calc(var(--aurora) * 70%), transparent), transparent 60%),
+      var(--page-base);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, "Ubuntu", "Cantarell", sans-serif;
+    font-size: 14px; line-height: 1.35;
     display: flex; justify-content: center;
+    -webkit-font-smoothing: antialiased;
   }
-  /* Fills the window instead of staying pinned at a fixed size — resizing
-     or maximizing the WebView2 window (it's a normal resizable
-     WS_OVERLAPPEDWINDOW, see webui.go) used to just leave empty bars
-     around a static 560x640 card. body's flex row centers .card
-     horizontally and (default align-items:stretch) stretches it to the
-     full window height; .card itself is a flex column so its one
-     scrollable list per view can grow into whatever's left over instead
-     of a hardcoded max-height. */
+  /* Fills the window: one flex column whose single growing element per
+     view (the profile/app list, or a textarea — see .flex-grow) takes
+     whatever height is left, so resizing or maximizing the window never
+     leaves dead space. Capped in width so a maximized window keeps
+     readable line lengths. */
   .card {
-    background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow);
-    border: 1px solid var(--border); padding: 18px 20px 20px;
-    width: 100%; max-width: 900px;
+    width: 100%; max-width: 760px; padding: 14px 18px 16px;
     display: flex; flex-direction: column; min-height: 0;
   }
-  .topbar {
-    display: flex; align-items: center; justify-content: space-between;
-    margin: -4px -4px 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
+  svg.i { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  svg.i.sm { width: 15px; height: 15px; }
+
+  /* ---------- top bar ---------- */
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-shrink: 0; }
+  .brand { display: flex; align-items: center; gap: 9px; }
+  .brand-title {
+    font-size: 17px; font-weight: 700; letter-spacing: .2px;
   }
-  .brand { display: flex; align-items: center; gap: 8px; }
-  .brand-icon { width: 26px; height: 26px; position: relative; }
-  .brand-icon svg { position: absolute; inset: 0; transition: opacity .2s ease; }
-  .brand-title { font-size: 15px; font-weight: 700; letter-spacing: .2px; }
-  .topbar-actions { display: flex; align-items: center; gap: 8px; }
-  .icon-btn { padding: 4px 8px; font-size: 14px; line-height: 1; border-radius: 6px; }
-  .icon-btn.active { border-color: var(--accent); }
-  h1 { font-size: 15px; margin: 0 0 12px; font-weight: 700; flex-shrink: 0; }
+  .topbar-actions { display: flex; align-items: center; gap: 6px; }
+  .icon-btn {
+    width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 11px; background: transparent; border-color: transparent; color: var(--muted);
+  }
+  .icon-btn:hover { background: var(--surface-2); color: var(--ink); }
+  .icon-btn.active { background: var(--surface-2); color: var(--ink); border-color: var(--border-strong); }
+  .icon-btn svg.i { transition: transform .4s ease; }
+  #settings-toggle-btn:hover svg.i { transform: rotate(60deg); }
+
+  /* ---------- panels ---------- */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+
+  /* ---------- hero (connection status) ---------- */
+  .hero {
+    position: relative; overflow: hidden; flex-shrink: 0;
+    padding: 24px 18px 20px 30px; margin-bottom: 18px;
+  }
+  .hero::before {
+    /* Accent wash behind the status, only while a tunnel is up. */
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(90% 120% at 0% 50%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%);
+    opacity: 0; transition: opacity .5s ease;
+  }
+  .hero.on::before { opacity: 1; }
+  .hero-main { position: relative; display: flex; align-items: center; gap: 30px; }
+  .orb {
+    position: relative; width: 78px; height: 78px; flex-shrink: 0; border-radius: 50%;
+    display: grid; place-items: center; cursor: pointer;
+    background: var(--surface-2); border: 1px solid var(--border);
+    transition: transform .2s ease, box-shadow .4s ease, background .4s ease;
+  }
+  .orb:hover { transform: scale(1.04); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+  .orb:active { transform: scale(.97); }
+  .orb.busy { pointer-events: none; }
+  .orb-ring {
+    position: absolute; inset: -4px; border-radius: 50%; opacity: 0; transition: opacity .4s ease;
+    background: conic-gradient(from 0deg, var(--accent), var(--accent-dark), transparent 70%, var(--accent));
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  }
+  .hero.on .orb { box-shadow: 0 0 46px -6px color-mix(in srgb, var(--accent) 70%, transparent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+  .hero.on .orb-ring { opacity: 1; }
+  /* Swirling dust around the logo — drawn by the orb-dust script. */
+  .orb-dust { position: absolute; left: 50%; top: 50%; width: 200px; height: 200px; transform: translate(-50%, -50%); pointer-events: none; }
+  /* Spins only while connecting — a constantly spinning ring cost as much
+     as all the dust; the dust alone keeps the logo alive. */
+  .hero.connecting .orb-ring { opacity: .9; animation: orb-spin 1.1s linear infinite; }
+  @keyframes orb-spin { to { transform: rotate(360deg); } }
+  .brand-icon { width: 46px; height: 46px; position: relative; }
+  .brand-icon svg { position: absolute; inset: 0; width: 46px; height: 46px; transition: opacity .35s ease; }
+  .hero.on .brand-icon svg { filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 70%, transparent)); }
+  .hero-text { min-width: 0; flex: 1; }
+  .hero-kicker { font-size: 11.5px; font-weight: 600; letter-spacing: .9px; text-transform: uppercase; color: var(--faint); margin-bottom: 4px; }
+  /* #status-text is the hero's big title — the dot before it is the
+     same green/amber/red/grey state the tray icon shows. */
+  .status-text { font-size: 22px; font-weight: 700; letter-spacing: -.2px; display: flex; align-items: center; gap: 9px; }
+  .status-text::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--faint); flex-shrink: 0; transition: background .3s ease, box-shadow .3s ease; }
+  .status-text.connected::before { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 22%, transparent); }
+  .status-text.connecting::before { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 22%, transparent); animation: blink 1s ease-in-out infinite; }
+  .status-text.disconnected.error::before { background: var(--bad); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 22%, transparent); }
+  .hero-sub { color: var(--muted); font-size: 13px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hero-sub.error { color: var(--bad); }
+  /* Live speed, right of the "Status" label, while connected. */
+  .hero-kicker-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+  .hero-kicker-row .hero-kicker { margin: 0; }
+  .hero-speed { display: none; gap: 12px; font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hero.on .hero-speed { display: flex; }
+  .hero-speed span { display: inline-flex; align-items: center; gap: 4px; }
+  .hero-speed svg.i { width: 13px; height: 13px; stroke-width: 2.5; }
+  .hero-speed .sp-down svg.i { color: var(--accent); }
+  .hero-speed .sp-up svg.i { color: var(--accent-dark); }
+  .hero-speed small { font-size: 11px; color: var(--muted); font-weight: 600; margin-left: 2px; }
+  /* Connect celebration: a flash of the accent spreading from the logo. */
+  .hero::after {
+    content: ''; position: absolute; left: 69px; top: 63px; width: 10px; height: 10px; border-radius: 50%;
+    background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 55%, transparent), transparent);
+    transform: translate(-50%, -50%) scale(0); opacity: 0; pointer-events: none;
+  }
+  .hero.flash::after { animation: hero-flash 1.1s cubic-bezier(.2, .7, .3, 1); }
+  @keyframes hero-flash { 0% { opacity: 1; transform: translate(-50%, -50%) scale(0); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(140); } }
+  .status-text.connected {
+    background: linear-gradient(90deg, var(--ink) 30%, color-mix(in srgb, var(--accent) 55%, var(--ink)));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  /* One chip per connected tunnel: name, state, the apps it routes. */
+  .included-apps { position: relative; margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .tunnel-block {
+    display: flex; align-items: center; gap: 9px; min-width: 0; max-width: 100%;
+    padding: 6px 10px 6px 8px; border-radius: 11px;
+    background: color-mix(in srgb, var(--surface-2) 80%, transparent); border: 1px solid var(--border);
+  }
+  .tunnel-head { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .tunnel-head::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .tunnel-head.connecting::before { background: var(--warn); animation: blink 1s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .included-apps-icons { display: flex; flex-wrap: wrap; gap: 4px; }
+  .included-app-icon { width: 20px; height: 20px; border-radius: 5px; object-fit: contain; }
+  .included-app-icon:not([src]) { visibility: hidden; }
+  .included-apps-fulltunnel { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+  /* ---------- section header ---------- */
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 10px; flex-shrink: 0; }
+  .section-title { font-size: 12px; font-weight: 700; letter-spacing: .9px; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .count-badge { font-size: 11px; font-weight: 700; letter-spacing: 0; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+
   .view { display: none; }
-  /* Each view is itself a flex column filling the remaining card height,
-     so exactly one element inside it (the profile/app list, or the
-     config textarea) can be marked to grow — see .flex-grow below. */
-  .view.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .view.active { display: flex; flex-direction: column; flex: 1; min-height: 0; animation: view-in .22s ease; }
+  @keyframes view-in { from { opacity: 0; transform: translateY(6px); } }
   .flex-grow { flex: 1; min-height: 0; }
-  .profile-list { list-style: none; margin: 0 0 14px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow-y: auto; transition: background .12s ease, border-color .12s ease; }
-  .profile-list.drag-over { border: 1px dashed var(--accent); background: var(--chip-bg); }
-  .profile-list li { padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border); transition: background .12s ease; }
-  .profile-list li:last-child { border-bottom: none; }
-  .profile-list li:hover { background: var(--chip-bg); }
-  .profile-list li.selected { background: var(--selected-bg); border-left: 3px solid var(--accent); padding-left: 9px; font-weight: 600; }
-  .profile-list li.empty { color: var(--muted); cursor: default; }
-  .profile-list li.empty:hover { background: transparent; }
-  /* Two equal-width click zones per row: the left half (profile-row-info)
-     selects the profile (for Edit…/Apps…/Domains…/Delete below), the
-     right half (profile-row-connect) connects/disconnects it directly —
-     no separate bottom Connect button/status line at all. The connect
-     half only appears on row hover (like the small button it replaced),
-     it just now claims half the row's width instead of a corner pill. */
-  .profile-row { display: flex; align-items: stretch; gap: 0; }
-  .profile-row-info { min-width: 0; flex: 1 1 0; cursor: pointer; }
-  .profile-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .profile-row-status { font-size: 11px; color: var(--muted); font-weight: 400; margin-top: 1px; min-height: 13px; }
-  .profile-row-status.connected { color: #2ee6a0; }
-  .profile-row-status.connecting { color: #e6b422; }
-  .profile-row-status.error { color: #e5484d; }
-  .profile-row-routing { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
-  .profile-row-connect {
-    flex: 1 1 0; min-width: 0; margin-left: 10px;
-    display: flex; align-items: center; justify-content: center;
-    cursor: pointer; opacity: 0; pointer-events: none;
-    transition: opacity .12s ease;
+
+  /* ---------- profile cards ---------- */
+  .profile-list {
+    list-style: none; margin: 0 -4px 12px; padding: 2px 4px 4px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 8px; border-radius: var(--radius);
+    outline: 2px dashed transparent; outline-offset: -2px; transition: outline-color .15s ease, background .15s ease;
   }
-  .profile-row:hover .profile-row-connect { opacity: 1; pointer-events: auto; }
-  .profile-row-connect.busy { opacity: .5 !important; pointer-events: none !important; }
-  /* The actual pill button inside that half — kept as its own element
-     (rather than styling profile-row-connect itself) so the click *zone*
-     stays half the row while the *button* it shows reads as an actual
-     button, not just a color change on plain text. */
+  .profile-list.drag-over { outline-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .profile-row {
+    display: flex; align-items: center; gap: 12px; padding: 11px 12px 11px 11px; flex-shrink: 0;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    cursor: pointer; transition: border-color .15s ease, background .25s ease, box-shadow .15s ease, transform .15s ease;
+  }
+  .profile-row:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+  .profile-row { position: relative; overflow: hidden; }
+  .profile-row > * { position: relative; }
+  /* A soft light that follows the cursor across a card (--mx/--my are
+     set by the profile list's mousemove handler). */
+  .profile-row::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .2s ease;
+    background: radial-gradient(220px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%);
+  }
+  .profile-row:hover::before { opacity: 1; }
+  .profile-row.enter { animation: card-in .4s cubic-bezier(.2, .8, .3, 1) backwards; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(10px) scale(.98); } }
+  .profile-row.selected { border-color: color-mix(in srgb, var(--accent) 65%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+  .profile-row.is-on { background: linear-gradient(110deg, color-mix(in srgb, var(--accent) 13%, var(--surface)), var(--surface) 70%); }
+  .profile-avatar {
+    width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0; display: grid; place-items: center;
+    font-weight: 700; font-size: 16px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border);
+    transition: background .3s ease, color .3s ease;
+  }
+  .profile-row.is-on .profile-avatar { background: var(--grad); color: #fff; border-color: transparent; box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--accent) 80%, transparent); }
+  .profile-row-info { min-width: 0; flex: 1 1 0; }
+  .profile-row-name { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-row-meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; min-width: 0; }
+  .profile-row-status { font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .profile-row-status:empty { display: none; }
+  .profile-row-status.connected { color: var(--ok-ink); }
+  .profile-row-status.connecting { color: var(--warn); }
+  .profile-row-status.error { color: var(--bad); }
+  .profile-row-status:not(:empty) + .profile-row-routing::before { content: '·'; margin-right: 8px; color: var(--faint); }
+  .profile-row-routing { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+  .mini-icons { display: inline-flex; }
+  .mini-icons img { width: 16px; height: 16px; border-radius: 4px; object-fit: contain; margin-right: 2px; }
+  .mini-icons img:not([src]) { visibility: hidden; }
+  /* The connect switch — always visible (it used to appear only on
+     hover, so first-time users didn't know where Connect was). */
+  .profile-row-connect { flex-shrink: 0; padding: 6px; margin: -6px; cursor: pointer; }
+  .profile-row-connect.busy { opacity: .55; pointer-events: none; }
   .profile-row-connect-btn {
-    padding: 6px 20px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
-    border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink);
-    transition: background .12s ease, border-color .12s ease, color .12s ease, filter .12s ease;
+    display: block; position: relative; width: 46px; height: 26px; border-radius: 999px;
+    background: var(--surface-3); border: 1px solid var(--border-strong);
+    transition: background .25s ease, border-color .25s ease;
   }
-  .profile-row-connect:hover .profile-row-connect-btn { background: var(--grad); color: #fff; border-color: transparent; filter: brightness(1.1); }
-  .profile-row-connect.active .profile-row-connect-btn { color: #e5484d; border-color: rgba(229,72,77,.4); }
-  .profile-row-connect.active:hover .profile-row-connect-btn {
-    background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); color: #fff; border-color: transparent;
+  .profile-row-connect-btn::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .35); transition: transform .25s cubic-bezier(.3, 1.4, .5, 1);
   }
+  :root:not(.light) .profile-row-connect-btn::after { background: #d9d7e6; }
+  .profile-row-connect:hover .profile-row-connect-btn { border-color: var(--accent); }
+  .profile-row-connect.active .profile-row-connect-btn { background: var(--grad); border-color: transparent; }
+  .profile-row-connect.active .profile-row-connect-btn::after { transform: translateX(20px); background: #fff; }
+  .profile-row-connect.pending .profile-row-connect-btn::after { animation: blink 1s ease-in-out infinite; }
+
+  .empty-state {
+    list-style: none; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 26px 20px; border: 1.5px dashed var(--border-strong); border-radius: var(--radius); color: var(--muted);
+  }
+  .empty-state .empty-icon { width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center; background: var(--grad); color: #fff; margin-bottom: 12px; box-shadow: 0 10px 24px -10px var(--accent); }
+  .empty-state .empty-icon svg.i { width: 26px; height: 26px; }
+  .empty-title { color: var(--ink); font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .empty-text { font-size: 12.5px; max-width: 300px; }
+
+  /* ---------- buttons ---------- */
   .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; flex-shrink: 0; }
   /* Applies only inside a [data-reorder] row — plain .row buttons elsewhere
      (Save/Cancel dialogs, theme swatches, etc.) are never draggable, so
      this never fights an ordinary click. */
-  [data-reorder] > button { cursor: grab; }
   [data-reorder] > button:active { cursor: grabbing; }
   [data-reorder] > button.dragging { opacity: .6; box-shadow: 0 0 0 2px var(--accent); position: relative; z-index: 1; }
   button {
-    padding: 7px 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--chip-bg);
-    color: var(--ink); cursor: pointer; font-size: 13px; transition: background .12s ease, filter .12s ease;
+    font-family: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 8px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+    color: var(--ink); cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: background .15s ease, border-color .15s ease, color .15s ease, filter .15s ease, transform .1s ease, opacity .15s ease;
   }
-  button:hover { background: var(--chip-hover); }
-  button:disabled { opacity: 0.4; cursor: default; }
-  button:disabled:hover { background: var(--chip-bg); }
-  button.primary { background: var(--grad); color: white; border-color: transparent; font-weight: 600; }
-  button.primary:hover { filter: brightness(1.12); }
-  /* Bottom status line — just a readout now (see profile-row-connect for
-     the actual per-row Connect/Disconnect action), no button of its own. */
-  .status-line { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
-  .status-text { font-weight: 600; display: flex; align-items: center; gap: 7px; }
-  .status-text::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #8a879c; flex-shrink: 0; }
-  .status-text.connected { color: #1fae7a; }
-  .status-text.connected::before { background: #2ee6a0; box-shadow: 0 0 0 3px rgba(46,230,160,.22); }
-  .status-text.connecting { color: #b8860b; }
-  .status-text.connecting::before { background: #e6b422; box-shadow: 0 0 0 3px rgba(230,180,34,.22); }
-  .status-text.disconnected { color: var(--muted); }
-  .status-text.disconnected.error { color: #e5484d; }
-  .status-text.disconnected.error::before { background: #e5484d; box-shadow: 0 0 0 3px rgba(229,72,77,.22); }
-  label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+  button:hover { background: var(--surface-3); border-color: var(--border-strong); }
+  button:active { transform: scale(.98); }
+  button:disabled { opacity: .4; cursor: default; }
+  button:disabled:hover { background: var(--surface-2); border-color: var(--border); }
+  button:disabled:active { transform: none; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.primary { background: var(--grad); color: #fff; border-color: transparent; font-weight: 600; box-shadow: 0 8px 20px -10px var(--accent); }
+  button.primary:hover { filter: brightness(1.1); }
+  button.primary.danger { background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); box-shadow: 0 8px 20px -10px #ff5c6a; }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  button.ghost:hover { background: var(--surface-2); color: var(--ink); }
+  button.small { padding: 6px 11px; font-size: 12.5px; border-radius: 9px; }
+  .action-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 0; padding: 6px; }
+  .action-bar > button { background: transparent; border-color: transparent; color: var(--muted); padding: 9px 6px; font-size: 12.5px; flex-direction: column; gap: 4px; }
+  .action-bar > button:hover { background: var(--surface-2); color: var(--ink); }
+  .action-bar > button.danger-hover:hover { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  .action-bar > button:disabled:hover { background: transparent; color: var(--muted); }
+  .action-bar > button span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  /* ---------- sub-view header ---------- */
+  .view-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-shrink: 0; }
+  .view-head h1 { flex: 1; min-width: 0; margin: 0; font-size: 18px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .backlink { padding: 7px 12px 7px 9px; }
+  h1 { font-size: 18px; margin: 0 0 12px; font-weight: 700; flex-shrink: 0; }
+
+  /* ---------- forms ---------- */
+  label { display: block; margin: 0 0 6px; font-weight: 600; font-size: 12.5px; color: var(--muted); }
   input[type=text], textarea {
-    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
-    font-family: Consolas, monospace; font-size: 13px; background: var(--input-bg); color: var(--ink);
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 10px;
+    font-family: inherit; font-size: 13.5px; background: var(--input-bg); color: var(--ink);
+    transition: border-color .15s ease, box-shadow .15s ease;
   }
-  input[type=text]:focus, textarea:focus { outline: none; border-color: var(--accent); background: var(--page-base); }
-  textarea { height: 220px; resize: vertical; }
+  textarea { font-family: "Cascadia Mono", Consolas, "Ubuntu Mono", monospace; font-size: 12.5px; line-height: 1.5; height: 220px; resize: vertical; }
+  input[type=text]:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+  textarea.flex-grow { height: auto; min-height: 110px; resize: none; }
   select {
-    padding: 7px 8px; border: 1px solid var(--border); border-radius: 7px;
+    font-family: inherit; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
     background: var(--input-bg); color: var(--ink); font-size: 13px; flex: 1; min-width: 0;
   }
   select:focus { outline: none; border-color: var(--accent); }
-  textarea.flex-grow { height: auto; resize: none; }
-  .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; flex-shrink: 0; overflow-wrap: anywhere; }
+  .field { margin-bottom: 14px; flex-shrink: 0; }
+  .field-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .field-head label { margin: 0; }
+  .group { padding: 4px 14px; margin-bottom: 14px; flex-shrink: 0; box-shadow: none; }
+  .group-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; min-height: 50px; }
+  .group-row + .group-row { border-top: 1px solid var(--border); }
+  .group-row-label { font-size: 13.5px; font-weight: 500; display: flex; align-items: center; gap: 10px; color: var(--ink); margin: 0; }
+  .group-row-label svg.i { color: var(--muted); }
+  .kbd-btn { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; min-width: 96px; }
+  .footer-bar { display: flex; justify-content: flex-end; gap: 8px; margin: 2px 0 0; padding-top: 12px; border-top: 1px solid var(--border); }
+  .footer-bar button { min-width: 110px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; flex-shrink: 0; overflow-wrap: anywhere; line-height: 1.45; }
   #update-status-text { flex-shrink: 1; min-width: 0; }
-  .error { color: var(--err-fg); background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 7px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; font-size: 12.5px; flex-shrink: 0; }
-  .app-list { list-style: none; margin: 8px 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow-y: auto; }
-  .app-list li { padding: 7px 10px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; gap: 9px; transition: background .12s ease; }
-  .app-list li:last-child { border-bottom: none; }
-  .app-list li:hover { background: var(--chip-bg); }
-  .app-icon { width: 20px; height: 20px; flex-shrink: 0; object-fit: contain; }
+  /* The error banners only — .error is also a state class on status
+     labels (.status-text, .profile-row-status, .hero-sub). */
+  #list-error, #edit-error, #settings-service-status.error { color: var(--err-fg); background: var(--err-bg); border: 1px solid var(--err-border); border-radius: 10px; padding: 9px 12px; margin: 0 0 12px; white-space: pre-wrap; font-size: 12.5px; flex-shrink: 0; }
+
+  /* ---------- search + app list ---------- */
+  .search { position: relative; margin-bottom: 10px; flex-shrink: 0; }
+  .search svg.i { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
+  .search input[type=text] { padding-left: 38px; }
+  .toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; flex-shrink: 0; flex-wrap: wrap; }
+  .toolbar .sep { width: 1px; align-self: stretch; background: var(--border-strong); margin: 4px 4px; }
+  .toolbar select { flex: 1 1 120px; }
+  .toolbar .icon-btn { width: 34px; height: 34px; background: var(--surface-2); border-color: var(--border); color: var(--ink); }
+  .toolbar .icon-btn:hover { background: var(--surface-3); }
+  .app-list { list-style: none; margin: 0 0 12px; padding: 4px; overflow-y: auto; }
+  .app-list li { padding: 8px 10px; border-radius: 10px; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background .12s ease; }
+  .app-list li + li { margin-top: 2px; }
+  .app-list li:hover { background: var(--surface-2); }
+  .app-list li.checked { background: color-mix(in srgb, var(--accent) 11%, transparent); }
+  .app-list li.empty-row { cursor: default; color: var(--muted); justify-content: center; padding: 22px 10px; text-align: center; }
+  .app-list li.empty-row:hover { background: transparent; }
+  .app-icon { width: 28px; height: 28px; flex-shrink: 0; object-fit: contain; border-radius: 6px; }
   .app-icon:not([src]) { visibility: hidden; }
-  .app-name { font-weight: 600; }
-  .app-path { color: var(--muted); font-size: 11px; }
-  .checkbox { width: 16px; text-align: center; font-size: 15px; color: var(--muted); }
-  .checkbox.checked { color: var(--accent); }
+  .app-name { font-weight: 600; font-size: 13.5px; }
+  .app-path { color: var(--faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+  .checkbox {
+    width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0; position: relative;
+    border: 1.5px solid var(--border-strong); background: var(--input-bg); transition: background .15s ease, border-color .15s ease;
+  }
+  .checkbox.checked { background: var(--grad); border-color: transparent; }
+  .checkbox.checked::after {
+    content: ''; position: absolute; left: 6px; top: 2.5px; width: 5px; height: 10px;
+    border: solid #fff; border-width: 0 2.2px 2.2px 0; transform: rotate(45deg);
+  }
   .app-list li > .app-name-wrap { flex-grow: 1; min-width: 0; }
-  .app-launch-btn { flex-shrink: 0; font-size: 11.5px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); cursor: pointer; }
-  .app-launch-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .app-launch-btn:disabled { opacity: .5; cursor: default; }
-  /* Top-of-view "← Back"/"← Done" nav — a real <button>, styled like every
-     other button (border/background/hover), not the link-style text it
-     used to be. */
-  .backlink { margin-bottom: 8px; align-self: flex-start; }
-  .icon-close { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 15px; }
-  .icon-close:hover { text-decoration: underline; }
-  .lang-switch { display: flex; gap: 4px; }
-  .lang-switch button { padding: 3px 9px; font-size: 11px; border-radius: 5px; }
-  .lang-switch button.active { background: var(--grad); color: #fff; border-color: transparent; }
-  ::-webkit-scrollbar { width: 9px; }
-  ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 5px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
-  .included-apps { margin-top: 10px; }
-  .included-apps-label { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
-  .included-apps-icons { display: flex; flex-wrap: wrap; gap: 6px; }
-  .included-app-icon {
-    width: 22px; height: 22px; border-radius: 6px; object-fit: contain;
-    background: var(--chip-bg); border: 1px solid var(--border); padding: 2px;
-  }
-  .included-app-icon:not([src]) { visibility: hidden; }
-  .included-apps-fulltunnel { color: var(--muted); font-size: 12px; }
-  .tunnel-block + .tunnel-block { margin-top: 10px; }
-  .tunnel-head { margin-bottom: 5px; }
+  .app-launch-btn { flex-shrink: 0; font-size: 12px; padding: 5px 10px; border-radius: 8px; }
+  .app-launch-btn:hover { background: var(--accent); color: #fff; border-color: transparent; }
+  .app-launch-btn.danger-hover:hover { background: var(--bad); }
+  .list-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-shrink: 0; }
+  .list-footer .hint { margin: 0; }
+
+  .icon-close { cursor: pointer; color: var(--muted); }
+  .seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--border); }
+  .seg button { padding: 5px 13px; font-size: 12.5px; border-radius: 8px; background: transparent; border-color: transparent; color: var(--muted); }
+  .seg button:hover { background: transparent; color: var(--ink); }
+  .seg button.active { background: var(--surface); color: var(--ink); border-color: var(--border); box-shadow: 0 2px 6px -2px rgba(0, 0, 0, .3); font-weight: 600; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: padding-box; }
+
+  /* ---------- settings ---------- */
   .theme-panel-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .theme-panel-row + .theme-panel-row { margin-top: 9px; }
-  .theme-panel-label { color: var(--muted); font-size: 11px; width: 100%; }
-  .theme-mode-btn { padding: 4px 12px; font-size: 12px; }
-  .theme-mode-btn.active { background: var(--grad); color: #fff; border-color: transparent; }
+  .theme-panel-row + .theme-panel-row { margin-top: 12px; }
+  .theme-panel-label { color: var(--ink); font-size: 13.5px; font-weight: 500; flex: 1; min-width: 120px; }
+  .theme-mode-btn.active { background: var(--surface); }
   .theme-swatch {
-    width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent;
-    cursor: pointer;
+    width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 2px solid transparent;
+    cursor: pointer; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .15);
   }
-  .theme-swatch.active { border-color: var(--ink); }
+  .theme-swatch:hover { transform: scale(1.12); }
+  .theme-swatch.active { border-color: var(--page-base); box-shadow: 0 0 0 2px var(--ink); }
   input[type=color] {
-    width: 32px; height: 24px; padding: 2px; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--chip-bg); cursor: pointer;
+    width: 34px; height: 28px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 8px;
+    background: var(--surface-2); cursor: pointer;
   }
-  /* When a background photo is set: the photo covers the whole window,
-     and the card becomes a translucent frosted panel over it instead of
-     a fully opaque one — otherwise the photo would only ever be visible
-     in the margins around a max-width card. color-mix()/backdrop-filter
-     both need a reasonably modern Chromium, which WebView2 always is. */
-  /* --bg-fit toggles between contain (whole photo visible, letterboxed —
-     the letterbox shows the theme's normal --page-base color, since
-     background-image only overrides the image layer, not the shorthand
-     rule's color layer beneath it) and cover (fills the window, crops
-     whatever doesn't fit) — user's choice, no single default suits every
-     photo/window-size combination. */
+  .settings-section + .settings-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .settings-section-title { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--faint); margin-bottom: 10px; }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .about-row { display: flex; align-items: center; gap: 12px; }
+  .app-tile { display: block; flex-shrink: 0; border-radius: 22%; box-shadow: 0 4px 14px -4px rgba(139, 61, 255, .5); }
+  .about-text { flex: 1; min-width: 0; }
+  .about-name { font-weight: 700; font-size: 14px; }
+
+  /* Background photo: covers the whole window, and every panel turns
+     into frosted glass over it. --bg-fit is contain (whole photo,
+     letterboxed on --page-base) or cover (fills, crops) — the user's
+     choice. */
   body.has-bg-image { background-size: var(--bg-fit, contain); background-position: center; background-repeat: no-repeat; background-attachment: fixed; }
-  body.has-bg-image .card { background: color-mix(in srgb, var(--card) 20%, transparent); backdrop-filter: blur(8px); }
-  /* The card going translucent left its own children — the list boxes —
-     still fully opaque with their normal solid dark background, which
-     then looked like solid black rectangles floating over the now much-
-     more-visible photo (found live 2026-09-04). Same translucent
-     treatment here, just without re-blurring what the card's own
-     backdrop-filter already blurred. Settings is its own modal over a
-     dark backdrop now, not a child of .card, so it's excluded — same
-     opaque treatment confirm-box/prompt-box already get. */
-  body.has-bg-image .profile-list,
-  body.has-bg-image .app-list {
-    background: color-mix(in srgb, var(--chip-bg) 45%, transparent);
+  body.has-bg-image .panel,
+  body.has-bg-image .profile-row {
+    background: color-mix(in srgb, var(--surface) 62%, transparent); backdrop-filter: blur(16px);
   }
-  body.has-bg-image .profile-list li:hover,
-  body.has-bg-image .app-list li:hover {
-    background: color-mix(in srgb, var(--chip-bg) 70%, transparent);
-  }
-  body.has-bg-image .profile-list li.selected {
-    background: color-mix(in srgb, var(--selected-bg) 60%, transparent);
-  }
-  .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+  body.has-bg-image .profile-row.is-on { background: color-mix(in srgb, var(--accent) 22%, color-mix(in srgb, var(--surface) 55%, transparent)); }
+  .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; margin: 0; }
   .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
   .switch-slider {
-    position: absolute; inset: 0; background: var(--chip-bg); border: 1px solid var(--border);
-    border-radius: 22px; cursor: pointer; transition: background .15s ease;
+    position: absolute; inset: 0; background: var(--surface-3); border: 1px solid var(--border-strong);
+    border-radius: 24px; cursor: pointer; transition: background .2s ease, border-color .2s ease;
   }
   .switch-slider::before {
-    content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
-    background: var(--card); border-radius: 50%; transition: transform .15s ease;
-    box-shadow: 0 1px 2px rgba(0,0,0,.3);
+    content: ''; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px;
+    background: #fff; border-radius: 50%; transition: transform .22s cubic-bezier(.3, 1.4, .5, 1);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
   }
+  :root:not(.light) .switch-slider::before { background: #d9d7e6; }
   .switch input:checked + .switch-slider { background: var(--grad); border-color: transparent; }
-  .switch input:checked + .switch-slider::before { transform: translateX(16px); background: #fff; }
-  .version-tag {
-    position: fixed; right: 10px; bottom: 6px; font-size: 10px; color: var(--muted);
-    opacity: 0.55; pointer-events: none; user-select: none;
-  }
+  .switch input:checked + .switch-slider::before { transform: translateX(18px); background: #fff; }
+  .version-tag { display: none; }
+
+  /* ---------- dialogs ---------- */
   .confirm-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.55);
-    display: flex; align-items: center; justify-content: center; z-index: 1000;
+    position: fixed; inset: 0; background: rgba(6, 5, 12, .6); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 16px;
+    animation: fade-in .18s ease;
   }
-  .confirm-box {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px 20px; max-width: 320px; box-shadow: var(--shadow);
+  .confirm-box, .settings-box {
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: 18px;
+    box-shadow: 0 30px 60px -20px rgba(0, 0, 0, .6); animation: pop-in .22s cubic-bezier(.2, 1.2, .4, 1);
   }
-  .settings-box {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px 20px; width: 380px; max-width: 90vw; box-shadow: var(--shadow);
-  }
-  .confirm-message { font-size: 13.5px; line-height: 1.5; }
-  button.primary.danger { background: linear-gradient(135deg, #ff5c6a 0%, #c2185b 100%); }
+  .confirm-box { padding: 20px; width: 340px; max-width: 100%; }
+  .settings-box { padding: 18px 20px 20px; width: 420px; max-width: 100%; max-height: 100%; overflow-y: auto; }
+  .settings-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .settings-head h2 { margin: 0; font-size: 18px; }
+  @keyframes fade-in { from { opacity: 0; } }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(8px) scale(.97); } }
+  .confirm-message { font-size: 14px; line-height: 1.5; font-weight: 500; }
+  .dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .dialog-buttons button { min-width: 96px; }
   /* Indeterminate progress bar for update-installing-overlay — there's no
      real byte/step progress to report (download size and dpkg/msiexec
      both run opaque to the GUI), so this only needs to read as "still
      working," not track an actual percentage. */
   .progress-track {
-    margin-top: 14px; height: 4px; border-radius: 2px; overflow: hidden;
-    background: var(--border);
+    margin-top: 16px; height: 5px; border-radius: 3px; overflow: hidden;
+    background: var(--surface-3);
   }
   .progress-fill {
-    height: 100%; width: 40%; border-radius: 2px; background: var(--grad);
+    height: 100%; width: 40%; border-radius: 3px; background: var(--grad);
     animation: progress-indeterminate 1.3s ease-in-out infinite;
   }
   @keyframes progress-indeterminate {
     0%   { transform: translateX(-100%); }
     100% { transform: translateX(250%); }
   }
+  /* ---------- space background (dark theme) ---------- */
+  /* A starfield canvas (the starfield script) over slowly drifting
+     accent-colored nebulae, behind everything; panels turn into frosted
+     glass so it shows through. Off in the light theme, under a
+     background photo, or when switched off in Settings. */
+  .space, .nebula { position: fixed; inset: 0; pointer-events: none; z-index: 0; display: none; }
+  body.space-on .space, body.space-on .nebula { display: block; }
+  .card { position: relative; z-index: 1; }
+  body.space-on {
+    background: radial-gradient(140% 100% at 50% 0%, #0f0b22 0%, #07060e 55%, #040309 100%);
+  }
+  .nebula { overflow: hidden; }
+  .nebula::before, .nebula::after, .nebula span {
+    content: ''; position: absolute; border-radius: 50%;
+  }
+  .nebula::before {
+    width: 95vmax; height: 70vmax; left: -35vmax; top: -30vmax;
+    background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 26%, transparent), color-mix(in srgb, var(--accent) 7%, transparent) 60%, transparent);
+  }
+  .nebula::after {
+    width: 90vmax; height: 75vmax; right: -40vmax; bottom: -35vmax;
+    background: radial-gradient(closest-side, color-mix(in srgb, var(--accent-dark) 22%, transparent), color-mix(in srgb, var(--accent-dark) 5%, transparent) 60%, transparent);
+  }
+  .nebula span.n-blue {
+    width: 60vmax; height: 40vmax; right: -15vmax; top: 10vmax;
+    background: radial-gradient(closest-side, rgba(60, 110, 255, .13), rgba(60, 110, 255, .03) 60%, transparent);
+  }
+  /* A faint Milky Way band across the window. */
+  .nebula span.n-band {
+    width: 160vmax; height: 26vmax; left: -30vmax; top: 30%;
+    transform: rotate(-24deg); border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(220, 210, 255, .07), rgba(220, 210, 255, .02) 55%, transparent);
+  }
+  body.space-on .panel,
+  body.space-on .profile-row {
+    /* No backdrop-filter here: re-blurring the animated sky behind every
+       panel each frame is what made this expensive. */
+    background: color-mix(in srgb, var(--surface) 86%, transparent);
+    border-color: rgba(255, 255, 255, .09);
+  }
+  body.space-on .profile-row.is-on {
+    background: linear-gradient(110deg, color-mix(in srgb, var(--accent) 20%, color-mix(in srgb, var(--surface) 86%, transparent)), color-mix(in srgb, var(--surface) 86%, transparent) 70%);
+  }
+  body.space-on .profile-row:hover { border-color: rgba(255, 255, 255, .18); }
+  body.space-on .profile-row.selected { border-color: color-mix(in srgb, var(--accent) 65%, transparent); }
+  /* Only the endless animations — pausing the one-shot entrance ones
+     would freeze them on their first, invisible frame. */
+  body.paused .orb-ring, body.paused .status-text::before,
+  body.paused .tunnel-head::before, body.paused .profile-row-connect-btn::after { animation-play-state: paused; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
 </style>
 </head>
 <body>
 
+<!-- Line icons (lucide-style strokes), referenced via <use href="#i-…">. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></symbol>
+  <symbol id="i-apps" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M12 18v-6M9 15l3-3 3 3"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15 6.7L3 16M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M3 21v-5h5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></symbol>
+  <!-- The Spectrune rune (logo variant "Космос", 2026-10-19): fill comes
+       from the <use>; s-rune-shine is the glass highlight laid over it. -->
+  <symbol id="s-rune" viewBox="0 0 256 256"><polygon points="160,40 196,40 120,104 176,132 96,216 60,216 132,148 76,120"/></symbol>
+  <symbol id="s-rune-shine" viewBox="0 0 256 256"><polygon points="160,40 196,40 120,104 176,132 96,216 60,216 132,148 76,120" fill="url(#runeShine)"/></symbol>
+  <linearGradient id="runeGrad" gradientUnits="userSpaceOnUse" x1="40" y1="30" x2="216" y2="226">
+    <stop offset="0" stop-color="#b06bff"/><stop offset=".45" stop-color="#8b3dff"/><stop offset="1" stop-color="#ff2d55"/>
+  </linearGradient>
+  <linearGradient id="runeGrey" gradientUnits="userSpaceOnUse" x1="40" y1="30" x2="216" y2="226">
+    <stop offset="0" stop-color="#c3c7cc"/><stop offset=".5" stop-color="#9aa0a6"/><stop offset="1" stop-color="#7a8086"/>
+  </linearGradient>
+  <linearGradient id="runeShine" gradientUnits="userSpaceOnUse" x1="60" y1="40" x2="150" y2="150">
+    <stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset=".5" stop-color="#fff" stop-opacity=".05"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+  </linearGradient>
+</svg>
+
+<div class="nebula"><span class="n-blue"></span><span class="n-band"></span></div>
+<canvas class="space" id="space"></canvas>
 <div class="card">
 <div class="topbar">
   <div class="brand">
-    <span class="brand-icon">
-      <svg id="brand-icon-active" viewBox="0 0 48 48" width="26" height="26" style="opacity:0">
-        <defs><linearGradient id="hdrActive" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="48" y2="48">
-          <stop offset="0" stop-color="#00e5ff"/><stop offset=".5" stop-color="#7a5cff"/><stop offset="1" stop-color="#ff3ea5"/>
-        </linearGradient></defs>
-        <path fill="url(#hdrActive)" d="M23.092 6.020c-5.353 0.448 -9.155 2.934 -10.526 6.889 -0.821 2.368 -0.691 5.648 0.306 7.625 0.533 1.054 1.609 2.283 2.759 3.150 1.320 0.991 3.756 2.141 6.611 3.127 2.861 0.991 4.424 1.784 5.353 2.719 0.680 0.680 0.963 1.348 0.963 2.294 0 0.923 -0.323 1.711 -0.969 2.357 -0.578 0.583 -1.292 0.878 -2.600 1.082 -0.753 0.113 -3.830 0.096 -4.872 -0.028 -1.983 -0.244 -3.954 -0.821 -5.773 -1.688 -0.385 -0.187 -0.714 -0.323 -0.731 -0.306 -0.034 0.034 -2.164 6.028 -2.164 6.090 0 0.215 3.059 1.467 4.674 1.920 1.229 0.340 2.702 0.567 4.436 0.685 1.127 0.074 3.609 0.074 4.623 -0.006 1.790 -0.130 3.569 -0.470 4.929 -0.935 0.799 -0.278 2.170 -0.969 2.810 -1.428 1.943 -1.382 3.150 -3.410 3.552 -5.988 0.119 -0.759 0.136 -2.782 0.023 -3.597 -0.312 -2.306 -0.974 -3.773 -2.351 -5.200 -1.535 -1.592 -3.982 -2.923 -8.265 -4.492 -3.082 -1.133 -4.271 -1.733 -5.059 -2.555 -0.561 -0.583 -0.816 -1.212 -0.816 -2.028 0 -1.048 0.470 -1.898 1.326 -2.402 1.518 -0.889 5.625 -0.946 8.209 -0.113 0.867 0.283 1.756 0.629 2.521 0.986 0.351 0.164 0.646 0.289 0.657 0.278 0.011 -0.011 0.516 -1.388 1.122 -3.053l1.110 -3.031 -0.227 -0.130c-0.691 -0.414 -3.053 -1.297 -4.413 -1.649 -0.776 -0.198 -2.147 -0.431 -3.053 -0.516 -0.895 -0.085 -3.405 -0.119 -4.164 -0.057z"/>
-      </svg>
-      <svg id="brand-icon-inactive" viewBox="0 0 48 48" width="26" height="26" style="opacity:1">
-        <defs><linearGradient id="hdrInactive" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="48" y2="48">
-          <stop offset="0" stop-color="#b4babf"/><stop offset=".5" stop-color="#9aa0a6"/><stop offset="1" stop-color="#7e848a"/>
-        </linearGradient></defs>
-        <path fill="url(#hdrInactive)" d="M23.092 6.020c-5.353 0.448 -9.155 2.934 -10.526 6.889 -0.821 2.368 -0.691 5.648 0.306 7.625 0.533 1.054 1.609 2.283 2.759 3.150 1.320 0.991 3.756 2.141 6.611 3.127 2.861 0.991 4.424 1.784 5.353 2.719 0.680 0.680 0.963 1.348 0.963 2.294 0 0.923 -0.323 1.711 -0.969 2.357 -0.578 0.583 -1.292 0.878 -2.600 1.082 -0.753 0.113 -3.830 0.096 -4.872 -0.028 -1.983 -0.244 -3.954 -0.821 -5.773 -1.688 -0.385 -0.187 -0.714 -0.323 -0.731 -0.306 -0.034 0.034 -2.164 6.028 -2.164 6.090 0 0.215 3.059 1.467 4.674 1.920 1.229 0.340 2.702 0.567 4.436 0.685 1.127 0.074 3.609 0.074 4.623 -0.006 1.790 -0.130 3.569 -0.470 4.929 -0.935 0.799 -0.278 2.170 -0.969 2.810 -1.428 1.943 -1.382 3.150 -3.410 3.552 -5.988 0.119 -0.759 0.136 -2.782 0.023 -3.597 -0.312 -2.306 -0.974 -3.773 -2.351 -5.200 -1.535 -1.592 -3.982 -2.923 -8.265 -4.492 -3.082 -1.133 -4.271 -1.733 -5.059 -2.555 -0.561 -0.583 -0.816 -1.212 -0.816 -2.028 0 -1.048 0.470 -1.898 1.326 -2.402 1.518 -0.889 5.625 -0.946 8.209 -0.113 0.867 0.283 1.756 0.629 2.521 0.986 0.351 0.164 0.646 0.289 0.657 0.278 0.011 -0.011 0.516 -1.388 1.122 -3.053l1.110 -3.031 -0.227 -0.130c-0.691 -0.414 -3.053 -1.297 -4.413 -1.649 -0.776 -0.198 -2.147 -0.431 -3.053 -0.516 -0.895 -0.085 -3.405 -0.119 -4.164 -0.057z"/>
-      </svg>
-    </span>
+    <img class="app-tile" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiB3aWR0aD0iMjU2IiBoZWlnaHQ9IjI1NiI+PGRlZnM+PHJhZGlhbEdyYWRpZW50IGlkPSJ0aWxlIiBjeD0iLjMiIGN5PSIuMiIgcj0iMSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjQxYTNmIi8+PHN0b3Agb2Zmc2V0PSIuNiIgc3RvcC1jb2xvcj0iIzExMGQxZiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA3MDYwZCIvPjwvcmFkaWFsR3JhZGllbnQ+PGZpbHRlciBpZD0iZ2xvdyIgeD0iLTUwJSIgeT0iLTUwJSIgd2lkdGg9IjIwMCUiIGhlaWdodD0iMjAwJSI+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iOSIvPjwvZmlsdGVyPjxsaW5lYXJHcmFkaWVudCBpZD0iZyIgeDE9IjQwIiB5MT0iMzAiIHgyPSIyMTYiIHkyPSIyMjYiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNiMDZiZmYiLz48c3RvcCBvZmZzZXQ9Ii40NSIgc3RvcC1jb2xvcj0iIzhiM2RmZiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI2ZmMmQ1NSIvPjwvbGluZWFyR3JhZGllbnQ+PHJhZGlhbEdyYWRpZW50IGlkPSJuZWIiIGN4PSIuNzUiIGN5PSIuOCIgcj0iLjciPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI2ZmMmQ1NSIgc3RvcC1vcGFjaXR5PSIuMzUiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNmZjJkNTUiIHN0b3Atb3BhY2l0eT0iMCIvPjwvcmFkaWFsR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJnbCIgeDE9IjYwIiB5MT0iNDAiIHgyPSIxNTAiIHkyPSIxNTAiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNmZmYiIHN0b3Atb3BhY2l0eT0iLjU1Ii8+PHN0b3Agb2Zmc2V0PSIuNSIgc3RvcC1jb2xvcj0iI2ZmZiIgc3RvcC1vcGFjaXR5PSIuMDUiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNmZmYiIHN0b3Atb3BhY2l0eT0iMCIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiByeD0iNTgiIGZpbGw9InVybCgjdGlsZSkiLz48cmVjdCB3aWR0aD0iMjU2IiBoZWlnaHQ9IjI1NiIgcng9IjU4IiBmaWxsPSJ1cmwoI25lYikiLz48Y2lyY2xlIGN4PSI2Ni4yIiBjeT0iMTM4LjQiIHI9IjEuMDQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNjQiLz48Y2lyY2xlIGN4PSIxNTcuNyIgY3k9IjI1LjUiIHI9IjAuNjIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNzkiLz48Y2lyY2xlIGN4PSI3MS4yIiBjeT0iNjUuMyIgcj0iMS43OSIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC41NiIvPjxjaXJjbGUgY3g9IjIwNy40IiBjeT0iMTIyLjQiIHI9IjEuMzciIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSIxNTkuOCIgY3k9IjIxNC45IiByPSIxLjIzIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjczIi8+PGNpcmNsZSBjeD0iMTY4LjUiIGN5PSIyNS4xIiByPSIxLjUxIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iODEuMSIgY3k9IjE3LjMiIHI9IjEuNjQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNTYiLz48Y2lyY2xlIGN4PSIxNzkuNiIgY3k9IjIxNy40IiByPSIxLjQ2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjg1Ii8+PGNpcmNsZSBjeD0iMTAzLjIiIGN5PSIxOTkuMCIgcj0iMS4xMyIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC44NiIvPjxjaXJjbGUgY3g9IjIxNy40IiBjeT0iMzMuMCIgcj0iMC43NiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC4zOSIvPjxjaXJjbGUgY3g9IjIzNy45IiBjeT0iMTEyLjkiIHI9IjEuMzUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDUiLz48Y2lyY2xlIGN4PSIxMjkuNyIgY3k9IjEwMS4xIiByPSIxLjAyIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iMTQ3LjkiIGN5PSIyMjMuNCIgcj0iMS40MiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC44NSIvPjxjaXJjbGUgY3g9IjIxMi4xIiBjeT0iMjQzLjkiIHI9IjEuNDEiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzYiLz48Y2lyY2xlIGN4PSIyMTMuMSIgY3k9IjIzNy43IiByPSIxLjY5IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYyIi8+PGNpcmNsZSBjeD0iMTc4LjUiIGN5PSI1OS44IiByPSIxLjYwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYyIi8+PGNpcmNsZSBjeD0iNzcuMiIgY3k9IjI1LjAiIHI9IjEuNjIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuODkiLz48Y2lyY2xlIGN4PSIzMC45IiBjeT0iMTk4LjkiIHI9IjEuMDkiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSI3OS40IiBjeT0iMTkxLjQiIHI9IjEuNjUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjgiLz48Y2lyY2xlIGN4PSIxNTUuMCIgY3k9IjIwLjYiIHI9IjEuNDYiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDciLz48Y2lyY2xlIGN4PSIyMTcuOSIgY3k9IjI0MS40IiByPSIxLjIxIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjkwIi8+PGNpcmNsZSBjeD0iODMuMSIgY3k9IjI4LjIiIHI9IjEuMzIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjciLz48Y2lyY2xlIGN4PSI1Ni42IiBjeT0iMTA2LjMiIHI9IjEuMzMiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSIyMC4wIiBjeT0iMjE0LjgiIHI9IjAuOTgiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuODciLz48Y2lyY2xlIGN4PSIyMjEuNiIgY3k9Ijk5LjIiIHI9IjEuMTUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNTkiLz48Y2lyY2xlIGN4PSIxNjIuMCIgY3k9IjE1MC42IiByPSIxLjI3IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjY1Ii8+PGNpcmNsZSBjeD0iMjMyLjAiIGN5PSIxMjkuNyIgcj0iMS4xMiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC43MiIvPjxjaXJjbGUgY3g9IjY2LjEiIGN5PSI4MS4xIiByPSIxLjc3IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjU5Ii8+PGNpcmNsZSBjeD0iMTM5LjQiIGN5PSIxMi43IiByPSIxLjEwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iMTQuNyIgY3k9IjE1NS4zIiByPSIxLjM2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjI5Ii8+PGNpcmNsZSBjeD0iMTU4LjEiIGN5PSIxMjAuMCIgcj0iMS40MiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC40OCIvPjxjaXJjbGUgY3g9IjE3Ni44IiBjeT0iMTg0LjIiIHI9IjAuNjMiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjkiLz48Y2lyY2xlIGN4PSIxNjkuNSIgY3k9IjIzNy4zIiByPSIwLjkwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjU1Ii8+PGNpcmNsZSBjeD0iMTQ5LjkiIGN5PSI4NS41IiByPSIxLjA0IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjQ1Ii8+PGNpcmNsZSBjeD0iOTcuMSIgY3k9IjE1MC42IiByPSIwLjk2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjUwIi8+PGNpcmNsZSBjeD0iMTkyLjMiIGN5PSIxNi40IiByPSIxLjI4IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjczIi8+PGNpcmNsZSBjeD0iODMuMiIgY3k9IjYyLjUiIHI9IjEuNTYiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDEiLz48Y2lyY2xlIGN4PSI1NC4yIiBjeT0iMTEyLjciIHI9IjEuNDQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzIiLz48Y2lyY2xlIGN4PSI4Ni4wIiBjeT0iODguOCIgcj0iMS42MCIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC41MyIvPjxjaXJjbGUgY3g9IjIxMS45IiBjeT0iNTAuMCIgcj0iMS4wMCIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC42NyIvPjxyZWN0IHg9IjEiIHk9IjEiIHdpZHRoPSIyNTQiIGhlaWdodD0iMjU0IiByeD0iNTciIGZpbGw9Im5vbmUiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwuMDkpIiBzdHJva2Utd2lkdGg9IjIiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZykiIGZpbHRlcj0idXJsKCNnbG93KSIgb3BhY2l0eT0iLjkiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZykiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwuMzUpIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZ2wpIi8+PC9zdmc+" width="28" height="28" alt="">
     <span class="brand-title">Spectrune</span>
   </div>
   <div class="topbar-actions">
-    <button id="settings-toggle-btn" class="icon-btn" title="Settings">⚙️</button>
+    <button id="settings-toggle-btn" class="icon-btn" data-i18n-title="settingsTitle" title="Settings"><svg class="i"><use href="#i-gear"/></svg></button>
   </div>
 </div>
 
 <div id="settings-overlay" class="confirm-overlay" style="display:none">
   <div class="settings-box">
-    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
-      <h2 style="margin:0;font-size:15px" data-i18n="settingsTitle">Settings</h2>
-      <span class="icon-close" id="settings-close" style="margin:0">✕</span>
-    </div>
-    <div class="theme-panel-row">
-      <span class="theme-panel-label" data-i18n="settingsLanguage">Language</span>
-      <div class="lang-switch">
-        <button id="lang-en">EN</button>
-        <button id="lang-ru">RU</button>
-      </div>
-    </div>
-    <div class="theme-panel-row" id="settings-autostart-row" style="display:none;justify-content:space-between">
-      <span data-i18n="settingsAutostart" style="width:auto">Launch on Windows startup</span>
-      <label class="switch">
-        <input type="checkbox" id="settings-autostart-toggle">
-        <span class="switch-slider"></span>
-      </label>
+    <div class="settings-head">
+      <h2 data-i18n="settingsTitle">Settings</h2>
+      <button class="icon-btn icon-close" id="settings-close"><svg class="i"><use href="#i-x"/></svg></button>
     </div>
     <div id="settings-service-status" class="hint" style="display:none"></div>
-    <div class="theme-panel-row">
-      <span class="theme-panel-label" data-i18n="themeMode">Mode</span>
-      <button id="theme-mode-dark" class="theme-mode-btn" data-i18n="themeDark">Dark</button>
-      <button id="theme-mode-light" class="theme-mode-btn" data-i18n="themeLight">Light</button>
+
+    <div class="settings-section">
+      <div class="settings-section-title" data-i18n="settingsAppearance">Appearance</div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="themeMode">Mode</span>
+        <div class="seg">
+          <button id="theme-mode-dark" class="theme-mode-btn" data-i18n="themeDark">Dark</button>
+          <button id="theme-mode-light" class="theme-mode-btn" data-i18n="themeLight">Light</button>
+        </div>
+      </div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="themeAccent">Accent color</span>
+        <div class="swatches">
+          <button class="theme-swatch" data-accent="violet" style="background:linear-gradient(135deg,#8b3dff,#ff2d55)"></button>
+          <button class="theme-swatch" data-accent="ocean" style="background:linear-gradient(135deg,#00c2ff,#2f6bff)"></button>
+          <button class="theme-swatch" data-accent="emerald" style="background:linear-gradient(135deg,#00e5b0,#12b76a)"></button>
+          <button class="theme-swatch" data-accent="sunset" style="background:linear-gradient(135deg,#ffb347,#ff5f6d)"></button>
+          <button class="theme-swatch" data-accent="crimson" style="background:linear-gradient(135deg,#ff5c8a,#c2185b)"></button>
+          <button class="theme-swatch" data-accent="slate" style="background:linear-gradient(135deg,#8a8fa3,#545a70)"></button>
+        </div>
+      </div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="themeCustomColors">Custom colors (full RGB)</span>
+        <input type="color" id="theme-custom-color1" value="#8b3dff">
+        <input type="color" id="theme-custom-color2" value="#ff2d55">
+      </div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="themeAnim">Animations</span>
+        <label class="switch">
+          <input type="checkbox" id="theme-anim-toggle">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+      <div class="theme-panel-row" id="theme-space-row">
+        <span class="theme-panel-label" data-i18n="themeSpace">Space background</span>
+        <label class="switch">
+          <input type="checkbox" id="theme-space-toggle">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="themeBackground">Background photo</span>
+        <button id="btn-choose-bg" class="small"><svg class="i sm"><use href="#i-image"/></svg><span data-i18n="themeChooseBg">Choose photo…</span></button>
+        <button id="btn-clear-bg" class="small ghost" data-i18n="themeClearBg">Clear</button>
+      </div>
+      <div class="theme-panel-row" id="theme-bg-fit-row" style="display:none">
+        <span class="theme-panel-label" data-i18n="themeBgFit">Fit</span>
+        <div class="seg">
+          <button id="theme-bg-fit-contain" class="theme-mode-btn" data-i18n="themeBgFitContain">Whole photo</button>
+          <button id="theme-bg-fit-cover" class="theme-mode-btn" data-i18n="themeBgFitCover">Fill (crop)</button>
+        </div>
+      </div>
     </div>
-    <div class="theme-panel-row">
-      <span class="theme-panel-label" data-i18n="themeAccent">Accent color</span>
-      <button class="theme-swatch" data-accent="violet" style="background:linear-gradient(135deg,#7a5cff,#ff3ea5)"></button>
-      <button class="theme-swatch" data-accent="ocean" style="background:linear-gradient(135deg,#00c2ff,#2f6bff)"></button>
-      <button class="theme-swatch" data-accent="emerald" style="background:linear-gradient(135deg,#00e5b0,#12b76a)"></button>
-      <button class="theme-swatch" data-accent="sunset" style="background:linear-gradient(135deg,#ffb347,#ff5f6d)"></button>
-      <button class="theme-swatch" data-accent="crimson" style="background:linear-gradient(135deg,#ff5c8a,#c2185b)"></button>
-      <button class="theme-swatch" data-accent="slate" style="background:linear-gradient(135deg,#8a8fa3,#545a70)"></button>
+
+    <div class="settings-section">
+      <div class="settings-section-title" data-i18n="settingsSystem">System</div>
+      <div class="theme-panel-row">
+        <span class="theme-panel-label" data-i18n="settingsLanguage">Language</span>
+        <div class="seg lang-switch">
+          <button id="lang-en">English</button>
+          <button id="lang-ru">Русский</button>
+        </div>
+      </div>
+      <div class="theme-panel-row" id="settings-autostart-row" style="display:none">
+        <span class="theme-panel-label" data-i18n="settingsAutostart">Launch on Windows startup</span>
+        <label class="switch">
+          <input type="checkbox" id="settings-autostart-toggle">
+          <span class="switch-slider"></span>
+        </label>
+      </div>
     </div>
-    <div class="theme-panel-row">
-      <span class="theme-panel-label" data-i18n="themeCustomColors">Custom colors (full RGB)</span>
-      <input type="color" id="theme-custom-color1" value="#7a5cff">
-      <input type="color" id="theme-custom-color2" value="#ff3ea5">
-    </div>
-    <div class="theme-panel-row">
-      <span class="theme-panel-label" data-i18n="themeBackground">Background photo</span>
-      <button id="btn-choose-bg" data-i18n="themeChooseBg">Choose photo…</button>
-      <button id="btn-clear-bg" data-i18n="themeClearBg">Clear</button>
-    </div>
-    <div class="theme-panel-row" id="theme-bg-fit-row" style="display:none">
-      <span class="theme-panel-label" data-i18n="themeBgFit">Fit</span>
-      <button id="theme-bg-fit-contain" class="theme-mode-btn" data-i18n="themeBgFitContain">Whole photo</button>
-      <button id="theme-bg-fit-cover" class="theme-mode-btn" data-i18n="themeBgFitCover">Fill (crop)</button>
-    </div>
-    <div class="theme-panel-row" style="justify-content:space-between;margin-top:4px;border-top:1px solid var(--border);padding-top:9px">
-      <span id="update-status-text" class="hint" style="margin:0"></span>
-      <button id="btn-check-update" data-i18n="updateCheckButton">Check for updates</button>
+
+    <div class="settings-section">
+      <div class="about-row">
+        <img class="app-tile" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiB3aWR0aD0iMjU2IiBoZWlnaHQ9IjI1NiI+PGRlZnM+PHJhZGlhbEdyYWRpZW50IGlkPSJ0aWxlIiBjeD0iLjMiIGN5PSIuMiIgcj0iMSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjQxYTNmIi8+PHN0b3Agb2Zmc2V0PSIuNiIgc3RvcC1jb2xvcj0iIzExMGQxZiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA3MDYwZCIvPjwvcmFkaWFsR3JhZGllbnQ+PGZpbHRlciBpZD0iZ2xvdyIgeD0iLTUwJSIgeT0iLTUwJSIgd2lkdGg9IjIwMCUiIGhlaWdodD0iMjAwJSI+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iOSIvPjwvZmlsdGVyPjxsaW5lYXJHcmFkaWVudCBpZD0iZyIgeDE9IjQwIiB5MT0iMzAiIHgyPSIyMTYiIHkyPSIyMjYiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNiMDZiZmYiLz48c3RvcCBvZmZzZXQ9Ii40NSIgc3RvcC1jb2xvcj0iIzhiM2RmZiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI2ZmMmQ1NSIvPjwvbGluZWFyR3JhZGllbnQ+PHJhZGlhbEdyYWRpZW50IGlkPSJuZWIiIGN4PSIuNzUiIGN5PSIuOCIgcj0iLjciPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI2ZmMmQ1NSIgc3RvcC1vcGFjaXR5PSIuMzUiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNmZjJkNTUiIHN0b3Atb3BhY2l0eT0iMCIvPjwvcmFkaWFsR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJnbCIgeDE9IjYwIiB5MT0iNDAiIHgyPSIxNTAiIHkyPSIxNTAiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNmZmYiIHN0b3Atb3BhY2l0eT0iLjU1Ii8+PHN0b3Agb2Zmc2V0PSIuNSIgc3RvcC1jb2xvcj0iI2ZmZiIgc3RvcC1vcGFjaXR5PSIuMDUiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNmZmYiIHN0b3Atb3BhY2l0eT0iMCIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiByeD0iNTgiIGZpbGw9InVybCgjdGlsZSkiLz48cmVjdCB3aWR0aD0iMjU2IiBoZWlnaHQ9IjI1NiIgcng9IjU4IiBmaWxsPSJ1cmwoI25lYikiLz48Y2lyY2xlIGN4PSI2Ni4yIiBjeT0iMTM4LjQiIHI9IjEuMDQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNjQiLz48Y2lyY2xlIGN4PSIxNTcuNyIgY3k9IjI1LjUiIHI9IjAuNjIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNzkiLz48Y2lyY2xlIGN4PSI3MS4yIiBjeT0iNjUuMyIgcj0iMS43OSIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC41NiIvPjxjaXJjbGUgY3g9IjIwNy40IiBjeT0iMTIyLjQiIHI9IjEuMzciIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSIxNTkuOCIgY3k9IjIxNC45IiByPSIxLjIzIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjczIi8+PGNpcmNsZSBjeD0iMTY4LjUiIGN5PSIyNS4xIiByPSIxLjUxIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iODEuMSIgY3k9IjE3LjMiIHI9IjEuNjQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNTYiLz48Y2lyY2xlIGN4PSIxNzkuNiIgY3k9IjIxNy40IiByPSIxLjQ2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjg1Ii8+PGNpcmNsZSBjeD0iMTAzLjIiIGN5PSIxOTkuMCIgcj0iMS4xMyIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC44NiIvPjxjaXJjbGUgY3g9IjIxNy40IiBjeT0iMzMuMCIgcj0iMC43NiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC4zOSIvPjxjaXJjbGUgY3g9IjIzNy45IiBjeT0iMTEyLjkiIHI9IjEuMzUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDUiLz48Y2lyY2xlIGN4PSIxMjkuNyIgY3k9IjEwMS4xIiByPSIxLjAyIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iMTQ3LjkiIGN5PSIyMjMuNCIgcj0iMS40MiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC44NSIvPjxjaXJjbGUgY3g9IjIxMi4xIiBjeT0iMjQzLjkiIHI9IjEuNDEiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzYiLz48Y2lyY2xlIGN4PSIyMTMuMSIgY3k9IjIzNy43IiByPSIxLjY5IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYyIi8+PGNpcmNsZSBjeD0iMTc4LjUiIGN5PSI1OS44IiByPSIxLjYwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYyIi8+PGNpcmNsZSBjeD0iNzcuMiIgY3k9IjI1LjAiIHI9IjEuNjIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuODkiLz48Y2lyY2xlIGN4PSIzMC45IiBjeT0iMTk4LjkiIHI9IjEuMDkiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSI3OS40IiBjeT0iMTkxLjQiIHI9IjEuNjUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjgiLz48Y2lyY2xlIGN4PSIxNTUuMCIgY3k9IjIwLjYiIHI9IjEuNDYiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDciLz48Y2lyY2xlIGN4PSIyMTcuOSIgY3k9IjI0MS40IiByPSIxLjIxIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjkwIi8+PGNpcmNsZSBjeD0iODMuMSIgY3k9IjI4LjIiIHI9IjEuMzIiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjciLz48Y2lyY2xlIGN4PSI1Ni42IiBjeT0iMTA2LjMiIHI9IjEuMzMiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzUiLz48Y2lyY2xlIGN4PSIyMC4wIiBjeT0iMjE0LjgiIHI9IjAuOTgiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuODciLz48Y2lyY2xlIGN4PSIyMjEuNiIgY3k9Ijk5LjIiIHI9IjEuMTUiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNTkiLz48Y2lyY2xlIGN4PSIxNjIuMCIgY3k9IjE1MC42IiByPSIxLjI3IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjY1Ii8+PGNpcmNsZSBjeD0iMjMyLjAiIGN5PSIxMjkuNyIgcj0iMS4xMiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC43MiIvPjxjaXJjbGUgY3g9IjY2LjEiIGN5PSI4MS4xIiByPSIxLjc3IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjU5Ii8+PGNpcmNsZSBjeD0iMTM5LjQiIGN5PSIxMi43IiByPSIxLjEwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjYzIi8+PGNpcmNsZSBjeD0iMTQuNyIgY3k9IjE1NS4zIiByPSIxLjM2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjI5Ii8+PGNpcmNsZSBjeD0iMTU4LjEiIGN5PSIxMjAuMCIgcj0iMS40MiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC40OCIvPjxjaXJjbGUgY3g9IjE3Ni44IiBjeT0iMTg0LjIiIHI9IjAuNjMiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMjkiLz48Y2lyY2xlIGN4PSIxNjkuNSIgY3k9IjIzNy4zIiByPSIwLjkwIiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjU1Ii8+PGNpcmNsZSBjeD0iMTQ5LjkiIGN5PSI4NS41IiByPSIxLjA0IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjQ1Ii8+PGNpcmNsZSBjeD0iOTcuMSIgY3k9IjE1MC42IiByPSIwLjk2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjUwIi8+PGNpcmNsZSBjeD0iMTkyLjMiIGN5PSIxNi40IiByPSIxLjI4IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjczIi8+PGNpcmNsZSBjeD0iODMuMiIgY3k9IjYyLjUiIHI9IjEuNTYiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuNDEiLz48Y2lyY2xlIGN4PSI1NC4yIiBjeT0iMTEyLjciIHI9IjEuNDQiIGZpbGw9IiNmZmYiIG9wYWNpdHk9IjAuMzIiLz48Y2lyY2xlIGN4PSI4Ni4wIiBjeT0iODguOCIgcj0iMS42MCIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC41MyIvPjxjaXJjbGUgY3g9IjIxMS45IiBjeT0iNTAuMCIgcj0iMS4wMCIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC42NyIvPjxyZWN0IHg9IjEiIHk9IjEiIHdpZHRoPSIyNTQiIGhlaWdodD0iMjU0IiByeD0iNTciIGZpbGw9Im5vbmUiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwuMDkpIiBzdHJva2Utd2lkdGg9IjIiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZykiIGZpbHRlcj0idXJsKCNnbG93KSIgb3BhY2l0eT0iLjkiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZykiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwuMzUpIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cG9seWdvbiBwb2ludHM9IjE2MCw0MCAxOTYsNDAgMTIwLDEwNCAxNzYsMTMyIDk2LDIxNiA2MCwyMTYgMTMyLDE0OCA3NiwxMjAiIGZpbGw9InVybCgjZ2wpIi8+PC9zdmc+" width="40" height="40" alt="">
+        <div class="about-text">
+          <div class="about-name">Spectrune</div>
+          <span id="update-status-text" class="hint" style="margin:0"></span>
+        </div>
+        <button id="btn-check-update" class="small"><svg class="i sm"><use href="#i-refresh"/></svg><span data-i18n="updateCheckButton">Check for updates</span></button>
+      </div>
     </div>
   </div>
 </div>
 
 <div id="view-list" class="view active">
   <div id="list-error" class="error" style="display:none"></div>
+  <div class="hero panel" id="hero">
+    <div class="hero-main">
+      <div class="orb" id="hero-orb">
+        <canvas class="orb-dust" id="orb-dust"></canvas>
+        <span class="orb-ring"></span>
+        <span class="brand-icon">
+          <svg id="brand-icon-active" viewBox="0 0 256 256" style="opacity:0"><use href="#s-rune" fill="url(#runeGrad)"/><use href="#s-rune-shine"/></svg>
+          <svg id="brand-icon-inactive" viewBox="0 0 256 256" style="opacity:1"><use href="#s-rune" fill="url(#runeGrey)"/><use href="#s-rune-shine"/></svg>
+        </span>
+      </div>
+      <div class="hero-text" id="status-line">
+        <div class="hero-kicker-row">
+          <div class="hero-kicker" data-i18n="heroKicker">Status</div>
+          <div class="hero-speed">
+            <span class="sp-down" data-i18n-title="statDown"><svg class="i"><use href="#i-down"/></svg><b id="stat-down"></b></span>
+            <span class="sp-up" data-i18n-title="statUp"><svg class="i"><use href="#i-up"/></svg><b id="stat-up"></b></span>
+          </div>
+        </div>
+        <div id="status-text" class="status-text disconnected"></div>
+        <div id="hero-sub" class="hero-sub"></div>
+      </div>
+    </div>
+    <div id="included-apps-row" class="included-apps" style="display:none"></div>
+  </div>
+  <div class="section-head">
+    <div class="section-title"><span data-i18n="profilesTitle">Profiles</span><span id="profiles-count" class="count-badge">0</span></div>
+    <button id="btn-add" class="small primary"><svg class="i sm"><use href="#i-plus"/></svg><span data-i18n="addShort">Add</span></button>
+  </div>
   <ul id="profile-list" class="profile-list flex-grow"></ul>
-  <div class="row" data-reorder="list-actions">
-    <button id="btn-add" data-i18n="add">Add…</button>
-    <button id="btn-edit" disabled data-i18n="edit">Edit…</button>
-    <button id="btn-apps" disabled data-i18n="apps">Apps…</button>
-    <button id="btn-domains" disabled data-i18n="domains">Domains…</button>
-    <button id="btn-delete" disabled data-i18n="delete">Delete</button>
+  <div class="row action-bar panel" data-reorder="list-actions">
+    <button id="btn-edit" disabled><svg class="i"><use href="#i-pencil"/></svg><span data-i18n="actEdit">Edit</span></button>
+    <button id="btn-apps" disabled><svg class="i"><use href="#i-apps"/></svg><span data-i18n="actApps">Apps</span></button>
+    <button id="btn-domains" disabled><svg class="i"><use href="#i-globe"/></svg><span data-i18n="actDomains">Domains</span></button>
+    <button id="btn-delete" class="danger-hover" disabled><svg class="i"><use href="#i-trash"/></svg><span data-i18n="delete">Delete</span></button>
   </div>
-  <div class="status-line" id="status-line">
-    <span id="status-text" class="status-text disconnected"></span>
-  </div>
-  <div id="included-apps-row" class="included-apps" style="display:none"></div>
 </div>
 
 <div id="view-edit" class="view">
-  <button class="backlink" id="edit-back" data-i18n="back">&larr; Back</button>
-  <h1 id="edit-title">Add profile</h1>
-  <div id="edit-error" class="error" style="display:none"></div>
-  <label for="edit-name" data-i18n="name">Name</label>
-  <input type="text" id="edit-name">
-  <div class="row" style="margin-top:10px;align-items:center;justify-content:space-between">
-    <label style="margin:0" data-i18n="autoConnect">Connect automatically on startup</label>
-    <label class="switch">
-      <input type="checkbox" id="edit-autoconnect">
-      <span class="switch-slider"></span>
-    </label>
+  <div class="view-head">
+    <button class="backlink ghost" id="edit-back"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back">Back</span></button>
+    <h1 id="edit-title">Add profile</h1>
   </div>
-  <div class="row" style="margin-top:10px;align-items:center;justify-content:space-between">
-    <label style="margin:0" data-i18n="hotkey">Hotkey</label>
-    <div class="row" style="margin:0">
-      <button id="btn-hotkey-capture" type="button"></button>
-      <button id="btn-hotkey-clear" type="button" data-i18n="hotkeyClear">Clear</button>
+  <div id="edit-error" class="error" style="display:none"></div>
+  <div class="field">
+    <label for="edit-name" data-i18n="name">Name</label>
+    <input type="text" id="edit-name" data-i18n-placeholder="namePlaceholder">
+  </div>
+  <div class="group panel">
+    <div class="group-row">
+      <span class="group-row-label"><svg class="i"><use href="#i-bolt"/></svg><span data-i18n="autoConnect">Connect automatically on startup</span></span>
+      <label class="switch">
+        <input type="checkbox" id="edit-autoconnect">
+        <span class="switch-slider"></span>
+      </label>
+    </div>
+    <div class="group-row">
+      <span class="group-row-label"><svg class="i"><use href="#i-key"/></svg><span data-i18n="hotkey">Hotkey</span></span>
+      <div class="row" style="margin:0;flex-wrap:nowrap">
+        <button id="btn-hotkey-capture" class="small kbd-btn" type="button"></button>
+        <button id="btn-hotkey-clear" class="small ghost" type="button" data-i18n="hotkeyClear">Clear</button>
+      </div>
     </div>
   </div>
-  <label for="edit-config" style="margin-top:14px" data-i18n="configLabel">Configuration</label>
-  <textarea id="edit-config" class="flex-grow" spellcheck="false"></textarea>
-  <div class="row" data-reorder="edit-subviews" style="margin-top:10px">
-    <button id="btn-open-apps">Apps: 0 selected…</button>
-    <button id="btn-open-domains">Domains: 0 enabled…</button>
+  <div class="field-head">
+    <label for="edit-config" data-i18n="configLabel">Configuration</label>
+    <button id="btn-import" class="small ghost"><svg class="i sm"><use href="#i-file"/></svg><span data-i18n="importFile">Import from file…</span></button>
   </div>
-  <div class="row">
-    <button id="btn-import" data-i18n="importFile">Import from file…</button>
-  </div>
-  <div class="row" data-reorder="edit-save-cancel">
+  <textarea id="edit-config" class="flex-grow" spellcheck="false" style="margin-bottom:12px"></textarea>
+  <div class="footer-bar" data-reorder="edit-save-cancel">
+    <button id="btn-cancel" class="ghost" data-i18n="cancel">Cancel</button>
     <button id="btn-save" class="primary" data-i18n="save">Save</button>
-    <button id="btn-cancel" data-i18n="cancel">Cancel</button>
   </div>
 </div>
 
 <div id="view-apps" class="view">
-  <div class="row" style="margin-bottom:8px">
-    <button class="backlink" id="apps-back" data-i18n="done">&larr; Done</button>
-    <button class="backlink" id="btn-apps-cancel" data-i18n="cancel">Cancel</button>
+  <div class="view-head">
+    <button class="backlink ghost" id="btn-apps-cancel"><svg class="i"><use href="#i-back"/></svg><span data-i18n="cancel">Cancel</span></button>
+    <h1 data-i18n="applications">Applications</h1>
+    <button class="primary" id="apps-back"><svg class="i sm"><use href="#i-check"/></svg><span data-i18n="done">Done</span></button>
   </div>
-  <h1 data-i18n="applications">Applications</h1>
   <p class="hint" data-i18n="appsHint">Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Add…" to browse for one not listed here.</p>
-  <input type="text" id="apps-search" data-i18n-placeholder="searchPlaceholder" placeholder="Search installed applications…">
-  <div class="row" data-reorder="apps-select">
-    <button id="btn-select-all" data-i18n="selectAll">Select all</button>
-    <button id="btn-clear-all" data-i18n="clearSelection">Clear selection</button>
+  <div class="search">
+    <svg class="i sm"><use href="#i-search"/></svg>
+    <input type="text" id="apps-search" data-i18n-placeholder="searchPlaceholder" placeholder="Search installed applications…">
   </div>
-  <div class="row" style="align-items:center">
-    <select id="apps-preset-select"></select>
-    <button id="btn-load-preset" data-i18n="presetLoad">Load</button>
-    <button id="btn-save-preset" data-i18n="presetSaveAs">Save as…</button>
-    <button id="btn-delete-preset" data-i18n="presetDelete">Delete</button>
+  <div class="toolbar">
+    <div class="row" data-reorder="apps-select" style="margin:0">
+      <button id="btn-select-all" class="small" data-i18n="selectAll">Select all</button>
+      <button id="btn-clear-all" class="small" data-i18n="clearSelection">Clear selection</button>
+    </div>
+    <span class="sep"></span>
+    <select id="apps-preset-select" data-i18n-title="presetsTitle"></select>
+    <button id="btn-load-preset" class="icon-btn" data-i18n-title="presetLoad"><svg class="i sm"><use href="#i-download"/></svg></button>
+    <button id="btn-save-preset" class="icon-btn" data-i18n-title="presetSaveAs"><svg class="i sm"><use href="#i-save"/></svg></button>
+    <button id="btn-delete-preset" class="icon-btn" data-i18n-title="presetDelete"><svg class="i sm"><use href="#i-trash"/></svg></button>
   </div>
   <div id="apps-taken-note" class="hint" style="display:none"></div>
-  <ul id="apps-list" class="app-list flex-grow"></ul>
-  <div class="row">
-    <button id="btn-browse-app" data-i18n="add">Add…</button>
+  <ul id="apps-list" class="app-list panel flex-grow"></ul>
+  <div class="list-footer">
+    <span id="apps-selected-count" class="hint"></span>
+    <button id="btn-browse-app" class="small"><svg class="i sm"><use href="#i-plus"/></svg><span data-i18n="browseApp">Other app…</span></button>
   </div>
 </div>
 
 <div id="view-domains" class="view">
-  <button class="backlink" id="domains-back" data-i18n="done">&larr; Done</button>
-  <h1 data-i18n="domainLists">Domain lists</h1>
+  <div class="view-head">
+    <h1 data-i18n="domainLists">Domain lists</h1>
+    <button class="primary" id="domains-back"><svg class="i sm"><use href="#i-check"/></svg><span data-i18n="done">Done</span></button>
+  </div>
   <p class="hint" data-i18n="domainsHint">Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list's domains with "Edit".</p>
-  <ul id="domains-list" class="app-list flex-grow"></ul>
-  <div class="row">
-    <button id="btn-new-domain-list" data-i18n="domainsNewList">+ New list…</button>
+  <ul id="domains-list" class="app-list panel flex-grow"></ul>
+  <div class="list-footer">
+    <span></span>
+    <button id="btn-new-domain-list" class="small"><svg class="i sm"><use href="#i-plus"/></svg><span data-i18n="domainsNewList">New list…</span></button>
   </div>
 </div>
 
 <div id="view-domain-edit" class="view">
-  <button class="backlink" id="domain-edit-back" data-i18n="back">&larr; Back</button>
-  <h1 id="domain-edit-title"></h1>
+  <div class="view-head">
+    <button class="backlink ghost" id="domain-edit-back"><svg class="i"><use href="#i-back"/></svg><span data-i18n="back">Back</span></button>
+    <h1 id="domain-edit-title"></h1>
+  </div>
   <p class="hint" data-i18n="domainEditHint">One domain per line (e.g. discord.com) — subdomains are matched automatically.</p>
-  <textarea id="domain-edit-text" class="flex-grow" spellcheck="false"></textarea>
-  <div class="row" data-reorder="domain-edit-save-cancel">
+  <textarea id="domain-edit-text" class="flex-grow" spellcheck="false" style="margin-bottom:12px"></textarea>
+  <div class="footer-bar" data-reorder="domain-edit-save-cancel">
+    <button id="btn-domain-edit-cancel" class="ghost" data-i18n="cancel">Cancel</button>
     <button id="btn-domain-edit-save" class="primary" data-i18n="save">Save</button>
-    <button id="btn-domain-edit-cancel" data-i18n="cancel">Cancel</button>
   </div>
 </div>
 
@@ -535,8 +855,8 @@ const webUIHTML = `<!DOCTYPE html>
 <div id="confirm-overlay" class="confirm-overlay" style="display:none">
   <div class="confirm-box">
     <div id="confirm-message" class="confirm-message"></div>
-    <div class="row" style="margin-top:16px;justify-content:flex-end">
-      <button id="confirm-cancel" data-i18n="cancel">Cancel</button>
+    <div class="dialog-buttons">
+      <button id="confirm-cancel" class="ghost" data-i18n="cancel">Cancel</button>
       <button id="confirm-ok" class="primary danger" data-i18n="delete">Delete</button>
     </div>
   </div>
@@ -545,39 +865,33 @@ const webUIHTML = `<!DOCTYPE html>
 <div id="prompt-overlay" class="confirm-overlay" style="display:none">
   <div class="confirm-box">
     <div id="prompt-message" class="confirm-message"></div>
-    <input type="text" id="prompt-input" style="margin-top:10px">
-    <div class="row" style="margin-top:16px;justify-content:flex-end">
-      <button id="prompt-cancel" data-i18n="cancel">Cancel</button>
+    <input type="text" id="prompt-input" style="margin-top:12px">
+    <div class="dialog-buttons">
+      <button id="prompt-cancel" class="ghost" data-i18n="cancel">Cancel</button>
       <button id="prompt-ok" class="primary" data-i18n="save">Save</button>
     </div>
   </div>
 </div>
-
 <script>
 'use strict';
 
 var I18N = {
   en: {
     add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
-    connected: 'Connected: %s', disconnected: 'Disconnected', connecting: 'Connecting to %s…',
-    connectionError: 'Connection error. Unavailable.',
     connectedShort: 'Connected', connectingShort: 'Connecting…', errorShort: 'Error',
     routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d',
     connect: 'Connect', disconnect: 'Disconnect',
-    noProfiles: 'No profiles yet — click Add… to create one.',
     confirmDelete: 'Delete profile "%s"?',
-    back: '← Back', addProfile: 'Add profile', editProfile: 'Edit profile',
+    back: 'Back', addProfile: 'Add profile', editProfile: 'Edit profile',
     name: 'Name', configLabel: "Configuration",
-    importFile: 'Import from file…', appsSelected: 'Apps: %d selected…',
+    importFile: 'Import from file…',
     importNamePrompt: 'Name for this tunnel:', importNameHint: 'Visible only to you',
     save: 'Save', cancel: 'Cancel', nameRequired: 'A name is required.',
-    done: '← Done', applications: 'Applications',
-    appsHint: 'Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Add…" to browse for one not listed here.',
+    done: 'Done', applications: 'Applications',
+    appsHint: 'Select the applications whose traffic should be routed through this tunnel. Click a row to toggle it, or use "Other app…" to browse for one not listed here.',
     searchPlaceholder: 'Search installed applications…',
     selectAll: 'Select all', clearSelection: 'Clear selection',
-    routedApps: 'Routed through the tunnel:',
     appsTakenNote: 'Apps routed by connected profile(s) %s are hidden.',
-    noAppsFullTunnel: 'Nothing selected — all traffic goes through the VPN.',
     settingsTitle: 'Settings', settingsLanguage: 'Language',
     settingsAutostart: 'Launch on Windows startup',
     updateVersionLine: 'Version %%VERSION%%', updateCheckButton: 'Check for updates',
@@ -604,36 +918,46 @@ var I18N = {
     themeCustomColors: 'Custom colors (full RGB)', themeBackground: 'Background photo',
     themeChooseBg: 'Choose photo…', themeClearBg: 'Clear',
     themeBgFit: 'Fit', themeBgFitContain: 'Whole photo', themeBgFitCover: 'Fill (crop)',
-    domainsSelected: 'Domains: %d enabled…', domainLists: 'Domain lists',
+    themeSpace: 'Space background', themeAnim: 'Animations',
+    domainLists: 'Domain lists',
     domainsHint: 'Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list\'s domains with "Edit".',
-    domainsNewList: '+ New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
+    domainsNewList: 'New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
     domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
-    domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "+ New list…" to create one.',
+    domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "New list…" to create one.',
     serviceNotRunning: 'The Spectrune service isn\'t running — nothing will connect until it is. Start it now?',
     serviceStarting: 'Starting the service…', serviceStartFailed: 'Could not start the service. Try starting it manually as an administrator.',
     startNow: 'Start',
+    heroKicker: 'Status', profilesTitle: 'Profiles', addShort: 'Add',
+    actEdit: 'Edit', actApps: 'Apps', actDomains: 'Domains',
+    statusOff: 'Not connected', statusError: 'Connection failed',
+    heroSubOff: 'Switch on a profile below, or click the logo',
+    heroSubError: "The server didn't respond. Check the profile and try again.",
+    heroSubOn: 'Traffic goes through %s',
+    orbConnect: 'Connect "%s"', orbDisconnect: 'Disconnect all',
+    emptyTitle: 'No profiles yet', emptyText: 'Drop a .conf file here, or click "Add" to paste a configuration.',
+    namePlaceholder: 'e.g. Netherlands',
+    browseApp: 'Other app…', presetsTitle: 'App presets',
+    appsSelectedCount: 'Selected: %d', appsNoMatch: 'Nothing found',
+    settingsAppearance: 'Appearance', settingsSystem: 'System',
+    statDown: 'Download', statUp: 'Upload',
+    unitB: 'B/s', unitKB: 'KB/s', unitMB: 'MB/s', unitGB: 'GB/s',
   },
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
-    connected: 'Подключено: %s', disconnected: 'Отключено', connecting: 'Подключение к %s…',
-    connectionError: 'Ошибка подключения. Недоступен.',
     connectedShort: 'Подключено', connectingShort: 'Подключение…', errorShort: 'Ошибка',
     routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d',
     connect: 'Подключить', disconnect: 'Отключить',
-    noProfiles: 'Пока нет профилей — нажмите «Добавить…», чтобы создать.',
     confirmDelete: 'Удалить профиль «%s»?',
-    back: '← Назад', addProfile: 'Новый профиль', editProfile: 'Изменение профиля',
+    back: 'Назад', addProfile: 'Новый профиль', editProfile: 'Изменение профиля',
     name: 'Название', configLabel: 'Конфигурация',
-    importFile: 'Импорт из файла…', appsSelected: 'Приложения: выбрано %d…',
+    importFile: 'Импорт из файла…',
     importNamePrompt: 'Название туннеля:', importNameHint: 'Отображается только для вас',
     save: 'Сохранить', cancel: 'Отмена', nameRequired: 'Укажите название.',
-    done: '← Готово', applications: 'Приложения',
-    appsHint: 'Выберите приложения, трафик которых должен идти через этот туннель. Нажмите на строку, чтобы переключить, или используйте «Добавить…», чтобы указать путь вручную.',
+    done: 'Готово', applications: 'Приложения',
+    appsHint: 'Выберите приложения, трафик которых должен идти через этот туннель. Нажмите на строку, чтобы переключить, или «Другое приложение…», чтобы указать путь вручную.',
     searchPlaceholder: 'Поиск установленных приложений…',
     selectAll: 'Выбрать все', clearSelection: 'Очистить выбор',
-    routedApps: 'Маршрутизируются через туннель:',
     appsTakenNote: 'Скрыты приложения, которые уже идут через подключённые профили: %s.',
-    noAppsFullTunnel: 'Ничего не выбрано — весь трафик идёт через VPN.',
     settingsTitle: 'Настройки', settingsLanguage: 'Язык',
     settingsAutostart: 'Запускать при старте Windows',
     updateVersionLine: 'Версия %%VERSION%%', updateCheckButton: 'Проверить обновления',
@@ -660,14 +984,29 @@ var I18N = {
     themeCustomColors: 'Свои цвета (вся RGB-палитра)', themeBackground: 'Фоновое фото',
     themeChooseBg: 'Выбрать фото…', themeClearBg: 'Очистить',
     themeBgFit: 'Заполнение', themeBgFitContain: 'Целиком', themeBgFitCover: 'На весь экран (обрезка)',
-    domainsSelected: 'Домены: включено %d…', domainLists: 'Списки доменов',
+    themeSpace: 'Космический фон', themeAnim: 'Анимации',
+    domainLists: 'Списки доменов',
     domainsHint: 'Включите список, чтобы направить все его домены через этот туннель — независимо от того, какое приложение к ним обращается. Кнопка «Изменить» редактирует домены списка.',
-    domainsNewList: '+ Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
+    domainsNewList: 'Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
     domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
-    domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «+ Новый список…», чтобы создать.',
+    domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «Новый список…», чтобы создать.',
     serviceNotRunning: 'Служба Spectrune не запущена — без неё ничего не подключится. Запустить сейчас?',
     serviceStarting: 'Запуск службы…', serviceStartFailed: 'Не удалось запустить службу. Попробуйте запустить её вручную от имени администратора.',
     startNow: 'Запустить',
+    heroKicker: 'Состояние', profilesTitle: 'Профили', addShort: 'Добавить',
+    actEdit: 'Изменить', actApps: 'Приложения', actDomains: 'Домены',
+    statusOff: 'Не подключено', statusError: 'Ошибка подключения',
+    heroSubOff: 'Включите профиль ниже или нажмите на логотип',
+    heroSubError: 'Сервер не ответил. Проверьте профиль и попробуйте ещё раз.',
+    heroSubOn: 'Трафик идёт через %s',
+    orbConnect: 'Подключить «%s»', orbDisconnect: 'Отключить всё',
+    emptyTitle: 'Пока нет профилей', emptyText: 'Перетащите сюда .conf файл или нажмите «Добавить», чтобы вставить конфигурацию.',
+    namePlaceholder: 'Например, Нидерланды',
+    browseApp: 'Другое приложение…', presetsTitle: 'Наборы приложений',
+    appsSelectedCount: 'Выбрано: %d', appsNoMatch: 'Ничего не найдено',
+    settingsAppearance: 'Оформление', settingsSystem: 'Система',
+    statDown: 'Загрузка', statUp: 'Отдача',
+    unitB: 'Б/с', unitKB: 'КБ/с', unitMB: 'МБ/с', unitGB: 'ГБ/с',
   },
 };
 
@@ -708,6 +1047,9 @@ var state = {
   // onto this.
   active: {},
   activeOrder: [],
+  stats: {},          // profile name -> {rx, tx, since} from the last getState
+  stateSeen: false,   // set after the first getState, so opening the window
+                      // on an already-up tunnel doesn't play the connect burst
   // connectStartedAt/errorProfiles back the "give up and say so" timeout
   // in refreshStatus below, per profile — a dead/blocked server (e.g. a
   // router whitelist that only lets specific traffic out) used to leave
@@ -716,6 +1058,11 @@ var state = {
   // indefinitely too. Reported 2026-09-14.
   connectStartedAt: {},
   errorProfiles: {}, // which rows get the error label — see refreshStatus
+  // The profile whose connect() call is still in flight. The service only
+  // lists a tunnel once Connect has done its setup, which takes seconds
+  // on some machines, so until then this keeps the profile shown as
+  // "Connecting…" instead of the UI sitting on "Not connected".
+  connectingName: null,
   editingExisting: false,
   installedApps: [],
   includedApps: [],   // lowercase path -> path, preserved case
@@ -729,7 +1076,7 @@ var state = {
   takenApps: {}, // see loadTakenApps
   lang: (function() { try { return localStorage.getItem('lang') || 'en'; } catch (e) { return 'en'; } })(),
   theme: (function() {
-    var fallback = { mode: 'dark', accent: 'violet', customColor1: '#7a5cff', customColor2: '#ff3ea5', bgImage: '', bgFit: 'contain' };
+    var fallback = { mode: 'dark', accent: 'violet', customColor1: '#8b3dff', customColor2: '#ff2d55', bgImage: '', bgFit: 'contain', space: true, anim: true };
     try {
       return {
         mode: localStorage.getItem('themeMode') || fallback.mode,
@@ -738,6 +1085,8 @@ var state = {
         customColor2: localStorage.getItem('themeCustomColor2') || fallback.customColor2,
         bgImage: localStorage.getItem('themeBgImage') || fallback.bgImage,
         bgFit: localStorage.getItem('themeBgFit') || fallback.bgFit,
+        space: localStorage.getItem('themeSpace') !== '0',
+        anim: localStorage.getItem('themeAnim') !== '0',
       };
     } catch (e) { return fallback; }
   })(),
@@ -751,6 +1100,13 @@ function show(id) {
 
 // ---------- list view ----------
 
+function markConnecting() {
+  var n = state.connectingName;
+  if (n === null || isActive(n)) return;
+  state.active[n] = false;
+  state.activeOrder.push(n);
+}
+
 function isActive(name) {
   return Object.prototype.hasOwnProperty.call(state.active, name);
 }
@@ -761,14 +1117,93 @@ function isActive(name) {
 function applyStateReply(s) {
   var tunnels = s.Tunnels;
   if (!tunnels) {
-    tunnels = s.Connected && s.ProfileName ? [{Name: s.ProfileName, HandshakeOK: s.HandshakeOK}] : [];
+    tunnels = s.Connected && s.ProfileName ? [{Name: s.ProfileName, HandshakeOK: s.HandshakeOK,
+      RxBytes: s.RxBytes, TxBytes: s.TxBytes, Since: s.Since}] : [];
   }
+  var was = state.active;
   state.active = {};
   state.activeOrder = [];
+  state.stats = {};
+  var justUp = false;
   tunnels.forEach(function(ts) {
     state.active[ts.Name] = !!ts.HandshakeOK;
     state.activeOrder.push(ts.Name);
+    state.stats[ts.Name] = { rx: ts.RxBytes || 0, tx: ts.TxBytes || 0, since: ts.Since || 0 };
+    if (ts.HandshakeOK && !was[ts.Name]) justUp = true;
   });
+  markConnecting();
+  if (justUp && state.stateSeen) celebrateConnect();
+  state.stateSeen = true;
+  sampleSpeed();
+}
+
+// ---------- live speed (hero) ----------
+// Speed is the change in the connected tunnels' byte totals between two
+// getState polls, lightly smoothed so the numbers don't flicker.
+var speedLast = null; // {t, rx, tx}
+var speedNow = null;  // {down, up} bytes/s
+
+function sampleSpeed() {
+  var rx = 0, tx = 0, up = false;
+  state.activeOrder.forEach(function(n) {
+    if (!state.active[n]) return;
+    up = true;
+    rx += state.stats[n].rx;
+    tx += state.stats[n].tx;
+  });
+  var now = Date.now();
+  if (!up) { speedLast = null; speedNow = null; renderSpeed(); return; }
+  if (speedLast && rx >= speedLast.rx && tx >= speedLast.tx && now > speedLast.t) {
+    var dt = (now - speedLast.t) / 1000;
+    var down = (rx - speedLast.rx) / dt, upB = (tx - speedLast.tx) / dt;
+    if (speedNow) { down = speedNow.down * .6 + down * .4; upB = speedNow.up * .6 + upB * .4; }
+    speedNow = { down: down, up: upB };
+  }
+  speedLast = { t: now, rx: rx, tx: tx };
+  renderSpeed();
+}
+
+function formatSpeed(bps) {
+  var units = ['unitB', 'unitKB', 'unitMB', 'unitGB'], i = 0;
+  while (bps >= 1000 && i < units.length - 1) { bps /= 1024; i++; }
+  var num = bps < 10 && i > 0 ? bps.toFixed(1) : String(Math.round(bps));
+  return num.replace('.', state.lang === 'ru' ? ',' : '.') + '<small>' + t(units[i]) + '</small>';
+}
+
+function renderSpeed() {
+  var sp = speedNow || { down: 0, up: 0 };
+  $('stat-down').innerHTML = formatSpeed(sp.down);
+  $('stat-up').innerHTML = formatSpeed(sp.up);
+}
+
+// setAnimationsPaused stops every animation while the window can't be
+// seen — hidden to the tray, minimized, or (on Linux) any time WebKit
+// reports the page hidden. Windows' WebView2 keeps rendering a hidden
+// window, so webui_windows.go calls window.setWindowVisible from the
+// window's show/hide/minimize messages.
+var windowHidden = false;
+var reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function setAnimationsPaused() {
+  var hidden = windowHidden || document.hidden;
+  var off = !state.theme.anim || reducedMotion;
+  document.body.classList.toggle('paused', hidden || off);
+  var mode = hidden ? 'stop' : off ? 'still' : 'run';
+  orbDust.setMode(mode);
+  starfield.setMode(mode);
+}
+window.setWindowVisible = function(visible) { windowHidden = !visible; setAnimationsPaused(); };
+document.addEventListener('visibilitychange', setAnimationsPaused);
+
+// celebrateConnect plays when a tunnel's handshake completes: the logo's
+// dust bursts outward, the stars jump to warp, and the hero flashes.
+function celebrateConnect() {
+  if (document.body.classList.contains('paused')) return; // animations off or window hidden
+  orbDust.burst();
+  starfield.warp();
+  var hero = $('hero');
+  hero.classList.remove('flash');
+  void hero.offsetWidth; // restart the animation
+  hero.classList.add('flash');
 }
 
 // disconnectOne disconnects just name, leaving other connected profiles
@@ -801,57 +1236,77 @@ function setRowStatus(statusEl, name) {
 function renderProfileList() {
   var ul = $('profile-list');
   ul.innerHTML = '';
+  $('profiles-count').textContent = state.profiles.length;
+  // With profiles but nothing picked yet, pick the first one, so the
+  // action bar under the list is never a row of disabled buttons and the
+  // hero's logo button has something to connect.
+  if (state.selected === null && state.profiles.length > 0) state.selected = state.profiles[0];
   if (state.profiles.length === 0) {
     var li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = t('noProfiles');
+    li.className = 'empty-state';
+    li.innerHTML = '<div class="empty-icon"><svg class="i"><use href="#i-file"/></svg></div>' +
+      '<div class="empty-title"></div><div class="empty-text"></div>';
+    li.querySelector('.empty-title').textContent = t('emptyTitle');
+    li.querySelector('.empty-text').textContent = t('emptyText');
     ul.appendChild(li);
   }
   state.profiles.forEach(function(name) {
     var li = document.createElement('li');
-    li.className = 'profile-row';
+    li.className = 'profile-row enter';
+    li.style.animationDelay = (ul.children.length * 45) + 'ms';
     li.dataset.name = name; // looked up by updateProfileRowStates below
-    if (name === state.selected) li.classList.add('selected');
+    li.addEventListener('animationend', function() { li.classList.remove('enter'); });
+    li.onmousemove = function(e) {
+      var r = li.getBoundingClientRect();
+      li.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+      li.style.setProperty('--my', (e.clientY - r.top) + 'px');
+    };
+    li.onclick = function() { state.selected = name; updateProfileRowStates(); };
+    li.ondblclick = function(e) {
+      if (e.target.closest('.profile-row-connect')) return;
+      openEdit(name);
+    };
+
+    var avatar = document.createElement('div');
+    avatar.className = 'profile-avatar';
+    avatar.textContent = (Array.from(name.trim())[0] || '?').toUpperCase();
 
     var info = document.createElement('div');
     info.className = 'profile-row-info';
     var nameEl = document.createElement('div');
     nameEl.className = 'profile-row-name';
     nameEl.textContent = name;
-    var statusEl = document.createElement('div');
+    var meta = document.createElement('div');
+    meta.className = 'profile-row-meta';
+    var statusEl = document.createElement('span');
     statusEl.className = 'profile-row-status';
-    var rowActive = isActive(name);
-    setRowStatus(statusEl, name);
-    var routingEl = document.createElement('div');
+    var routingEl = document.createElement('span');
     routingEl.className = 'profile-row-routing';
     loadRoutingSummaryInto(name, routingEl);
+    meta.appendChild(statusEl);
+    meta.appendChild(routingEl);
     info.appendChild(nameEl);
-    info.appendChild(statusEl);
-    info.appendChild(routingEl);
-    info.onclick = function() { state.selected = name; updateProfileRowStates(); };
+    info.appendChild(meta);
 
-    // profile-row-connect is the row's right half — see its CSS doc for
-    // why this replaced a small hover-only button. The half itself is a
-    // plain clickable div (sized as half the row), but it holds an
-    // actual pill-shaped button element so it still *reads* as a real
-    // Connect/Disconnect button, not just colored text.
+    // The connect switch. Its own click zone, so toggling it doesn't
+    // also count as a row click; state classes are set by
+    // updateProfileRowStates.
     var connectZone = document.createElement('div');
-    connectZone.className = 'profile-row-connect' + (rowActive ? ' active' : '') + (state.connectBusy ? ' busy' : '');
+    connectZone.className = 'profile-row-connect';
     var connectBtnInner = document.createElement('span');
     connectBtnInner.className = 'profile-row-connect-btn';
-    connectBtnInner.textContent = rowActive ? t('disconnect') : t('connect');
     connectZone.appendChild(connectBtnInner);
     connectZone.onclick = function(e) {
       e.stopPropagation();
       toggleConnectRow(name);
     };
 
+    li.appendChild(avatar);
     li.appendChild(info);
     li.appendChild(connectZone);
     ul.appendChild(li);
   });
-  updateButtons();
-  refreshIncludedAppsPreview();
+  updateProfileRowStates();
 }
 
 // updateProfileRowStates patches the already-rendered <li> elements in
@@ -874,11 +1329,13 @@ function updateProfileRowStates() {
     if (name === undefined) return; // the "no profiles" empty placeholder
     li.classList.toggle('selected', name === state.selected);
     var rowActive = isActive(name);
+    li.classList.toggle('is-on', rowActive && state.active[name]);
     setRowStatus(li.querySelector('.profile-row-status'), name);
     var connectZone = li.querySelector('.profile-row-connect');
     connectZone.classList.toggle('active', rowActive);
+    connectZone.classList.toggle('pending', rowActive && !state.active[name]);
     connectZone.classList.toggle('busy', state.connectBusy);
-    connectZone.querySelector('.profile-row-connect-btn').textContent = rowActive ? t('disconnect') : t('connect');
+    connectZone.title = rowActive ? t('disconnect') : t('connect');
   });
   updateButtons();
   refreshIncludedAppsPreview();
@@ -908,10 +1365,32 @@ function toggleConnectRow(name) {
     } else {
       p = connect(name);
     }
+    state.connectingName = name;
+    markConnecting();
+    updateProfileRowStates();
+    updateButtons();
+    p = p.then(function() { state.connectingName = null; },
+      function(err) { state.connectingName = null; throw err; });
   }
   p.then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
     .finally(function() { state.connectBusy = false; updateProfileRowStates(); });
 }
+
+// The hero's logo is a one-click power button: with anything connected
+// it disconnects everything, otherwise it connects the selected profile.
+$('hero-orb').onclick = function() {
+  if (state.connectBusy) return;
+  if (state.activeOrder.length === 0) {
+    if (state.selected) toggleConnectRow(state.selected);
+    return;
+  }
+  state.connectBusy = true;
+  updateProfileRowStates();
+  state.activeOrder.slice().reduce(function(p, n) {
+    return p.then(function() { return disconnectOne(n); });
+  }, Promise.resolve()).then(refreshStatus).catch(function(err) { showListError(err); refreshStatus(); })
+    .finally(function() { state.connectBusy = false; updateProfileRowStates(); });
+};
 
 function updateButtons() {
   var has = state.selected !== null;
@@ -924,9 +1403,14 @@ function updateButtons() {
   var up = state.activeOrder.filter(function(n) { return state.active[n]; });
   var pending = state.activeOrder.filter(function(n) { return !state.active[n]; });
   var anyError = Object.keys(state.errorProfiles).length > 0;
+  // The hero at the top of the list: a big state title, one line of
+  // detail under it, and the logo orb glowing/spinning to match.
+  var sub = $('hero-sub');
+  sub.classList.remove('error');
   if (up.length > 0) {
-    $('status-text').textContent = tf('connected', up.join(', '));
+    $('status-text').textContent = t('connectedShort');
     $('status-text').className = 'status-text connected';
+    sub.textContent = tf('heroSubOn', up.join(', '));
   } else if (pending.length > 0) {
     // Adapter/local bridge is up but the WireGuard handshake with the
     // peer hasn't completed (or never will, for a bad config/dead
@@ -934,15 +1418,25 @@ function updateButtons() {
     // just say "Connected" here regardless, which was actively
     // misleading: confirmed live 2026-09-04 with a profile whose tunnel
     // never actually passed traffic.
-    $('status-text').textContent = tf('connecting', pending.join(', '));
+    $('status-text').textContent = t('connectingShort');
     $('status-text').className = 'status-text connecting';
+    sub.textContent = pending.join(', ');
   } else if (anyError) {
-    $('status-text').textContent = t('connectionError');
+    $('status-text').textContent = t('statusError');
     $('status-text').className = 'status-text disconnected error';
+    sub.textContent = t('heroSubError');
+    sub.classList.add('error');
   } else {
-    $('status-text').textContent = t('disconnected');
+    $('status-text').textContent = t('statusOff');
     $('status-text').className = 'status-text disconnected';
+    sub.textContent = state.profiles.length ? t('heroSubOff') : '';
   }
+  $('hero').classList.toggle('on', up.length > 0);
+  $('hero').classList.toggle('connecting', up.length === 0 && pending.length > 0);
+  orbDust.refresh();
+  $('hero-orb').classList.toggle('busy', state.connectBusy);
+  $('hero-orb').title = state.activeOrder.length > 0 ? t('orbDisconnect') :
+    (state.selected ? tf('orbConnect', state.selected) : '');
   // Same colored-when-connected / grey-when-disconnected swap as the tray
   // icon (tray.go) and the Linux awg-gui counterpart's AppIndicator —
   // colored only once the handshake actually confirms the tunnel works.
@@ -1047,16 +1541,34 @@ function routingSummaryText(apps) {
   return tf('routingAppsCount', apps.length);
 }
 
+// fillRoutingSummary renders a card's routing line: "All traffic", or the
+// first few routed apps' icons plus the count.
+function fillRoutingSummary(el, apps) {
+  el.innerHTML = '';
+  if (apps.length > 0) {
+    var icons = document.createElement('span');
+    icons.className = 'mini-icons';
+    apps.slice(0, 4).forEach(function(p) {
+      var img = document.createElement('img');
+      img.title = p;
+      loadAppIcon(p, img);
+      icons.appendChild(img);
+    });
+    el.appendChild(icons);
+  }
+  el.appendChild(document.createTextNode(routingSummaryText(apps)));
+}
+
 function loadRoutingSummaryInto(name, el) {
   var cached = includedPreviewCache[name];
   if (cached !== undefined) {
-    el.textContent = routingSummaryText(cached);
+    fillRoutingSummary(el, cached);
     return;
   }
   loadProfile(name).then(function(details) {
     var apps = details.IncludedApps || [];
     includedPreviewCache[name] = apps;
-    if (el.isConnected) el.textContent = routingSummaryText(apps);
+    if (el.isConnected) fillRoutingSummary(el, apps);
   }).catch(function() { /* leave blank — not worth an error popup for a subtitle */ });
 }
 
@@ -1070,15 +1582,13 @@ var includedPreviewLoading = {}; // profile name -> true while its loadProfile i
 // to force a re-render.
 var includedAppsPreviewRenderedFor = undefined;
 
-// refreshIncludedAppsPreview fills the panel under the profile list. While
-// anything is connected it shows one block per connected profile: its
-// name and status, then its routed apps as icons (or "all traffic").
-// With nothing connected it previews the selected profile's apps.
+// refreshIncludedAppsPreview fills the strip at the bottom of the hero:
+// one chip per connected profile with its state and routed apps (or "all
+// traffic"). Hidden while nothing is connected — each profile card
+// already shows its own routing.
 function refreshIncludedAppsPreview() {
   var row = $('included-apps-row');
-  var connected = state.activeOrder.length > 0;
-  $('status-line').style.display = connected ? 'none' : '';
-  var names = connected ? state.activeOrder.slice() : (state.selected ? [state.selected] : []);
+  var names = state.activeOrder.slice();
   // Called from updateProfileRowStates's 3s poll — fetch whatever isn't
   // cached yet (and retry a failed fetch next tick), then only rebuild
   // the DOM when something visible actually changed, so icons don't
@@ -1092,31 +1602,23 @@ function refreshIncludedAppsPreview() {
     }).catch(function() { /* retried on the next poll tick */ })
       .finally(function() { delete includedPreviewLoading[n]; });
   });
-  var sig = JSON.stringify([state.lang, connected, names.map(function(n) {
-    return [n, connected ? state.active[n] : null, includedPreviewCache[n] || null];
+  var sig = JSON.stringify([state.lang, names.map(function(n) {
+    return [n, state.active[n], includedPreviewCache[n] || null];
   })]);
   if (sig === includedAppsPreviewRenderedFor) return;
   includedAppsPreviewRenderedFor = sig;
-  if (names.length === 0) {
-    row.style.display = 'none';
-    row.innerHTML = '';
-    return;
-  }
-  if (!connected) {
-    var apps = includedPreviewCache[names[0]];
-    if (apps === undefined) return; // still loading
-    renderIncludedAppsPreview(apps);
-    return;
-  }
   row.innerHTML = '';
-  row.style.display = 'block';
+  // With one tunnel the subtitle already names it and its card shows its
+  // apps — the chips only earn their space with two or more.
+  row.style.display = names.length > 1 ? 'flex' : 'none';
   names.forEach(function(n) {
     var block = document.createElement('div');
     block.className = 'tunnel-block';
     var head = document.createElement('div');
     var ok = state.active[n];
-    head.className = 'status-text tunnel-head ' + (ok ? 'connected' : 'connecting');
-    head.textContent = n + ' — ' + (ok ? t('connectedShort') : t('connectingShort'));
+    head.className = 'tunnel-head' + (ok ? '' : ' connecting');
+    head.textContent = n;
+    head.title = ok ? t('connectedShort') : t('connectingShort');
     block.appendChild(head);
     var apps = includedPreviewCache[n];
     if (apps !== undefined) block.appendChild(includedAppsIcons(apps));
@@ -1130,7 +1632,7 @@ function includedAppsIcons(apps) {
   if (apps.length === 0) {
     var note = document.createElement('div');
     note.className = 'included-apps-fulltunnel';
-    note.textContent = t('noAppsFullTunnel');
+    note.textContent = t('routingFullTunnel');
     return note;
   }
   var icons = document.createElement('div');
@@ -1143,19 +1645,6 @@ function includedAppsIcons(apps) {
     icons.appendChild(img);
   });
   return icons;
-}
-
-function renderIncludedAppsPreview(apps) {
-  var row = $('included-apps-row');
-  row.innerHTML = '';
-  row.style.display = 'block';
-  if (apps.length > 0) {
-    var label = document.createElement('div');
-    label.className = 'included-apps-label';
-    label.textContent = t('routedApps');
-    row.appendChild(label);
-  }
-  row.appendChild(includedAppsIcons(apps));
 }
 
 function refreshStatus() {
@@ -1371,7 +1860,6 @@ function openEdit(name, jumpTo) {
 
 function finishOpenEdit(jumpTo) {
   updateAppsCount();
-  updateDomainsCount();
   show('view-edit');
   if (jumpTo === 'apps') openAppsPicker();
   else if (jumpTo === 'domains') openDomainsPicker();
@@ -1444,12 +1932,6 @@ $('btn-hotkey-clear').onclick = function() {
 
 $('edit-back').onclick = function() { stopHotkeyCapture(); show('view-list'); };
 $('btn-cancel').onclick = function() { stopHotkeyCapture(); show('view-list'); };
-$('btn-open-apps').onclick = function() {
-  stopHotkeyCapture();
-  state.appsOrigin = 'edit'; // opened from mid-edit — Cancel returns here, not the list
-  openAppsPicker();
-};
-$('btn-open-domains').onclick = function() { stopHotkeyCapture(); openDomainsPicker(); };
 $('btn-import').onclick = function() {
   importConfig().then(function(result) {
     if (!result || !result.Text) return;
@@ -1511,7 +1993,9 @@ function showEditError(err) {
   e.textContent = String(err);
 }
 
-function updateAppsCount() { $('btn-open-apps').textContent = tf('appsSelected', state.includedApps.length); }
+function updateAppsCount() {
+  $('apps-selected-count').textContent = tf('appsSelectedCount', state.includedApps.length);
+}
 
 // ---------- apps picker view ----------
 
@@ -1645,13 +2129,13 @@ function renderAppsList() {
     .forEach(function(a) {
       var li = document.createElement('li');
       var included = !!includedSet[a.Path.toLowerCase()];
+      if (included) li.className = 'checked';
       var cb = document.createElement('span');
       cb.className = included ? 'checkbox checked' : 'checkbox';
-      cb.textContent = included ? '☑' : '☐';
       var icon = document.createElement('img');
       icon.className = 'app-icon';
-      icon.width = 20;
-      icon.height = 20;
+      icon.width = 28;
+      icon.height = 28;
       loadAppIcon(a.Path, icon);
       var text = document.createElement('span');
       text.className = 'app-name-wrap';
@@ -1682,6 +2166,13 @@ function renderAppsList() {
       li.onclick = function() { toggleApp(a.Path); };
       ul.appendChild(li);
     });
+  if (!ul.children.length && state.installedApps.length) {
+    var none = document.createElement('li');
+    none.className = 'empty-row';
+    none.textContent = t('appsNoMatch');
+    ul.appendChild(none);
+  }
+  $('apps-selected-count').textContent = tf('appsSelectedCount', state.includedApps.length);
 }
 
 // iconCache maps a lowercase path to the promise of its data URI, shared
@@ -1771,7 +2262,6 @@ $('btn-browse-app').onclick = function() {
 // lists themselves (their actual domains) are edited in one shared place
 // via view-domain-edit rather than duplicated per profile.
 
-function updateDomainsCount() { $('btn-open-domains').textContent = tf('domainsSelected', state.includedDomainLists.length); }
 
 function openDomainsPicker() {
   show('view-domains');
@@ -1790,8 +2280,8 @@ function renderDomainsList() {
   ul.innerHTML = '';
   if (state.domainLists.length === 0) {
     var empty = document.createElement('li');
+    empty.className = 'empty-row';
     empty.textContent = t('domainListNoLists');
-    empty.style.cursor = 'default';
     ul.appendChild(empty);
     return;
   }
@@ -1824,14 +2314,13 @@ function renderDomainsList() {
 
     var delBtn = document.createElement('button');
     delBtn.type = 'button';
-    delBtn.className = 'app-launch-btn';
+    delBtn.className = 'app-launch-btn danger-hover';
     delBtn.textContent = t('delete');
     delBtn.onclick = function() {
       showConfirm(tf('domainListConfirmDelete', name), function() {
         deleteDomainList(name).then(function() {
           state.includedDomainLists = state.includedDomainLists.filter(function(n) { return n !== name; });
-          updateDomainsCount();
-          refreshDomainLists();
+                  refreshDomainLists();
         }).catch(showEditError);
       });
     };
@@ -1851,7 +2340,6 @@ function toggleDomainList(name) {
   } else {
     state.includedDomainLists.splice(idx, 1);
   }
-  updateDomainsCount();
 }
 
 $('domains-back').onclick = function() {
@@ -1897,6 +2385,9 @@ $('btn-domain-edit-cancel').onclick = function() {
   show('view-domains');
   refreshDomainLists();
 };
+// Back leaves the editor without saving, same as Cancel — it never had a
+// handler before, so it did nothing.
+$('domain-edit-back').onclick = $('btn-domain-edit-cancel').onclick;
 
 // ---------- language switching ----------
 
@@ -1907,6 +2398,9 @@ function applyI18n() {
   document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
     el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
   });
+  document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
+    el.title = t(el.getAttribute('data-i18n-title'));
+  });
   $('lang-en').classList.toggle('active', state.lang === 'en');
   $('lang-ru').classList.toggle('active', state.lang === 'ru');
   // Re-run the dynamic renderers so text they build themselves (status
@@ -1914,7 +2408,6 @@ function applyI18n() {
   // data-i18n pass above only covers static markup.
   renderProfileList();
   updateAppsCount();
-  updateDomainsCount();
   renderHotkeyValue();
   renderUpdateStatus();
   if ($('view-apps').classList.contains('active')) renderAppsList();
@@ -1939,7 +2432,7 @@ $('lang-ru').onclick = function() { setLang('ru'); };
 // assets on disk, which can't be recolored at runtime.
 
 var THEMES = {
-  violet:  { c1: '#7a5cff', c2: '#ff3ea5' },
+  violet:  { c1: '#8b3dff', c2: '#ff2d55' },
   ocean:   { c1: '#00c2ff', c2: '#2f6bff' },
   emerald: { c1: '#00e5b0', c2: '#12b76a' },
   sunset:  { c1: '#ffb347', c2: '#ff5f6d' },
@@ -1947,13 +2440,132 @@ var THEMES = {
   slate:   { c1: '#8a8fa3', c2: '#545a70' },
 };
 
+// ---------- orb dust ----------
+// Glowing particles orbiting the hero logo, with short fading trails.
+// Their speed and brightness follow the hero's state: bright and calm
+// when connected, fast while connecting, a faint slow grey drift when
+// off. Easing between states (cur -> target) keeps a change smooth.
+// animTicker drives the canvas animations from one ~24 fps timer, so the
+// dust and the starfield redraw together and the page is re-composited
+// once per tick rather than once for each. Each handler returns whether
+// it still wants ticks; with none left the timer stops entirely (nothing
+// moving, nothing hidden still running at 60 Hz).
+var ANIM_SLOT_MS = 42;
+var animTicker = (function() {
+  var handlers = [], timer = null;
+  function tick() {
+    var now = performance.now(), any = false;
+    handlers.forEach(function(f) { if (f(now)) any = true; });
+    if (!any) { clearInterval(timer); timer = null; }
+  }
+  return {
+    add: function(f) { handlers.push(f); },
+    wake: function() { if (!timer) timer = setInterval(tick, ANIM_SLOT_MS); },
+  };
+})();
+
+var orbDust = (function() {
+  var canvas = $('orb-dust');
+  var ctx = canvas.getContext('2d');
+  var SIZE = 200, R_MIN = 41, R_MAX = 66;
+  var burst = 0; // 1 right after a connect, easing back to 0
+  var mode = 'run'; // see setMode
+  var dpr = 1, colors = [[139, 61, 255], [255, 45, 85]];
+  var cur = { speed: .25, glow: .35, tint: 0 };
+  var parts = [];
+  for (var i = 0; i < 54; i++) {
+    parts.push({
+      a: Math.random() * Math.PI * 2,
+      r: R_MIN + Math.pow(Math.random(), 1.6) * (R_MAX - R_MIN),
+      v: .006 + Math.random() * .012,         // radians per frame at speed 1
+      wob: Math.random() * Math.PI * 2,       // phase of the in/out drift
+      size: .5 + Math.random() * 1.7,
+      tw: Math.random() * Math.PI * 2,        // twinkle phase
+      mix: Math.random(),                     // where on the c1 -> c2 gradient
+    });
+  }
+  function hexToRgb(h) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(h || '');
+    if (!m) return [139, 61, 255];
+    var n = parseInt(m[1], 16);
+    return [n >> 16 & 255, n >> 8 & 255, n & 255];
+  }
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = SIZE * dpr;
+    canvas.height = SIZE * dpr;
+  }
+  // One step per animTicker tick (the per-step amounts below are sized
+  // for its ~24 fps).
+  animTicker.add(function() {
+    if (mode !== 'run') return false;
+    step(false);
+    return true;
+  });
+  // drawStill paints the dust unmoving, in the current state's colors —
+  // a few steps so it shows at full strength.
+  function drawStill() {
+    for (var k = 0; k < 6; k++) step(true);
+  }
+  function step(frozen) {
+    var hero = $('hero');
+    var target = hero.classList.contains('on') ? { speed: 1, glow: 1, tint: 1 }
+      : hero.classList.contains('connecting') ? { speed: 3, glow: .8, tint: 1 }
+      : { speed: .22, glow: .28, tint: 0 };
+    ['speed', 'glow', 'tint'].forEach(function(k) { cur[k] = frozen ? target[k] : cur[k] + (target[k] - cur[k]) * .1; });
+    burst *= .885;
+    if (canvas.width !== Math.round(SIZE * (window.devicePixelRatio || 1))) resize();
+    var light = document.documentElement.classList.contains('light');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Fade the previous frame instead of clearing it — that's the trail.
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = 'rgba(0,0,0,' + (.36 + .18 * (1 - cur.speed / 3)) + ')';
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    ctx.globalCompositeOperation = light ? 'source-over' : 'lighter';
+    var c = SIZE / 2, t = Date.now() / 1000;
+    parts.forEach(function(p) {
+      if (!frozen) p.a += p.v * 2.5 * (cur.speed + burst * 7);
+      var r = p.r + Math.sin(t * .8 + p.wob) * 2.5 + burst * (18 + p.size * 16);
+      var x = c + Math.cos(p.a) * r, y = c + Math.sin(p.a) * r;
+      // Dimmer toward the outer edge so the cloud has no hard rim.
+      var edge = 1 - Math.max(0, (r - R_MIN) / (R_MAX - R_MIN + 4));
+      if (burst > .01) edge = Math.max(edge, Math.min(1, 1 - (r - R_MAX) / 50));
+      var a = Math.min(1, (cur.glow + burst * .8) * Math.max(0, edge) * (.45 + .55 * Math.abs(Math.sin(t * 1.7 + p.tw))));
+      var col = [0, 1, 2].map(function(k) {
+        var accent = colors[0][k] + (colors[1][k] - colors[0][k]) * p.mix;
+        var grey = light ? 120 : 170;
+        return Math.round(grey + (accent - grey) * cur.tint);
+      });
+      ctx.fillStyle = 'rgba(' + col.join(',') + ',' + a.toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(x, y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+  resize();
+  animTicker.wake();
+  return {
+    setColors: function(c1, c2) { colors = [hexToRgb(c1), hexToRgb(c2)]; },
+    burst: function() { burst = 1; },
+    // setMode: 'run' animates, 'still' shows the dust frozen (animations
+    // off in Settings), 'stop' draws nothing new (window hidden).
+    setMode: function(m) {
+      mode = m;
+      if (m === 'run') animTicker.wake();
+      else if (m === 'still') drawStill();
+    },
+    // refresh redraws the still dust after the connection state changed.
+    refresh: function() { if (mode === 'still') drawStill(); },
+  };
+})();
+
 function applyTheme() {
   var root = document.documentElement;
   root.classList.toggle('light', state.theme.mode === 'light');
   var c1, c2;
   if (state.theme.accent === 'custom') {
-    c1 = state.theme.customColor1 || '#7a5cff';
-    c2 = state.theme.customColor2 || '#ff3ea5';
+    c1 = state.theme.customColor1 || '#8b3dff';
+    c2 = state.theme.customColor2 || '#ff2d55';
   } else {
     var preset = THEMES[state.theme.accent] || THEMES.violet;
     c1 = preset.c1;
@@ -1970,6 +2582,8 @@ function applyTheme() {
   // match the app's accent instead of leaving it whatever stock color
   // Windows uses.
   if (window.setTitleBarColor) window.setTitleBarColor(c1);
+  orbDust.setColors(c1, c2);
+  starfield.setAccent(c1);
 }
 
 function applyBackgroundImage() {
@@ -1985,7 +2599,169 @@ function applyBackgroundImage() {
   }
   $('theme-bg-fit-contain').classList.toggle('active', (state.theme.bgFit || 'contain') === 'contain');
   $('theme-bg-fit-cover').classList.toggle('active', state.theme.bgFit === 'cover');
+  // The space background is a dark-theme look, and a background photo
+  // replaces it.
+  var spaceOn = state.theme.space && state.theme.mode !== 'light' && !state.theme.bgImage;
+  document.body.classList.toggle('space-on', spaceOn);
+  $('theme-space-toggle').checked = state.theme.space;
+  $('theme-anim-toggle').checked = state.theme.anim;
+  $('theme-space-row').style.display = state.theme.mode === 'light' ? 'none' : 'flex';
+  starfield.setEnabled(spaceOn);
 }
+
+// ---------- starfield ----------
+// Three depths of stars drifting slowly left (a little faster while a
+// tunnel is up), a few twinkling, plus an occasional shooting star.
+// Cheap by design: each depth is drawn once into its own off-screen
+// canvas and then only blitted at an offset, so a frame is three image
+// copies plus a few dozen dots — at ~15 fps, and none at all while the
+// window is hidden (see setAnimationsPaused).
+var starfield = (function() {
+  var canvas = $('space');
+  var ctx = canvas.getContext('2d');
+  var w = 0, h = 0, dpr = 1;
+  var layers = [];   // [{img, speed, off}]
+  var twinklers = []; // a few stars drawn live, so they can twinkle
+  var shooting = null, nextShot = 0;
+  var enabled = false, mode = 'run', last = 0, tickN = 0, speed = 1;
+  var warpV = 0; // >0 right after a connect: stars streak out from the centre
+  var accent = '#8b3dff';
+  var LAYERS = [ // depth: star count per 100k px², radius, alpha, drift px/s
+    { density: 14, r: .45, a: .5, v: 3 },
+    { density: 5, r: .8, a: .75, v: 7 },
+    { density: 1.3, r: 1.2, a: .95, v: 14 },
+  ];
+  function starColor() {
+    var t = Math.random();
+    return t < .1 ? accent : t < .35 ? 'rgb(170,195,255)' : '#fff';
+  }
+  function build() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = window.innerWidth; h = window.innerHeight;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    layers = LAYERS.map(function(L) {
+      var img = document.createElement('canvas');
+      img.width = canvas.width; img.height = canvas.height;
+      var c = img.getContext('2d');
+      c.scale(dpr, dpr);
+      var n = Math.round(w * h / 100000 * L.density);
+      for (var i = 0; i < n; i++) {
+        c.globalAlpha = L.a * (.5 + Math.random() * .5);
+        c.fillStyle = starColor();
+        c.beginPath();
+        c.arc(Math.random() * w, Math.random() * h, L.r * (.7 + Math.random() * .6), 0, Math.PI * 2);
+        c.fill();
+      }
+      return { img: img, v: L.v, off: 0 };
+    });
+    twinklers = [];
+    for (var i = 0; i < 28; i++) {
+      twinklers.push({ x: Math.random() * w, y: Math.random() * h, r: .9 + Math.random() * .9,
+        tw: Math.random() * Math.PI * 2, tws: .8 + Math.random() * 2, c: starColor() });
+    }
+  }
+  // Every other animTicker tick (~12 fps) for the slow drift; every tick
+  // while a warp or shooting star is moving fast.
+  animTicker.add(function(now) {
+    if (!enabled || mode !== 'run') return false;
+    tickN++;
+    if (!(warpV > .02 || shooting) && tickN % 2) return true;
+    var dt = last ? Math.min(now - last, 250) : 0;
+    last = now;
+    paint(dt, false, now);
+    return true;
+  });
+  // kick restarts the drift, or paints one unmoving frame when
+  // animations are off in Settings.
+  function kick() {
+    if (!enabled) return;
+    if (mode === 'run') { last = 0; animTicker.wake(); }
+    else if (mode === 'still') paint(0, true);
+  }
+  function paint(dt, still, now) {
+    var reduced = still;
+    now = now || performance.now();
+    var target = $('hero').classList.contains('on') ? 2.2 : 1;
+    speed += (target - speed) * .05;
+    warpV *= .84;
+    var t = now / 1000;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+    layers.forEach(function(L) {
+      if (!reduced) L.off = (L.off + L.v * speed * dt / 1000 * dpr) % canvas.width;
+      var x = -Math.round(L.off);
+      ctx.drawImage(L.img, x, 0);
+      ctx.drawImage(L.img, x + canvas.width, 0);
+    });
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var cx = w / 2, cy = h / 3;
+    twinklers.forEach(function(s) {
+      var x = ((s.x - layers[2].off / dpr) % w + w) % w;
+      ctx.globalAlpha = still ? .85 : .55 + .45 * Math.sin(t * s.tws + s.tw);
+      ctx.fillStyle = s.c;
+      ctx.beginPath(); ctx.arc(x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+      if (!still && warpV > .02) {
+        // Warp: streaks pointing out from the centre.
+        var dx = x - cx, dy = s.y - cy, d = Math.sqrt(dx * dx + dy * dy) || 1;
+        var len = warpV * (40 + d * .5);
+        ctx.strokeStyle = s.c; ctx.lineWidth = s.r;
+        ctx.globalAlpha = Math.min(1, warpV * 1.2);
+        ctx.beginPath(); ctx.moveTo(x, s.y); ctx.lineTo(x + dx / d * len, s.y + dy / d * len); ctx.stroke();
+      }
+    });
+    if (!still && warpV > .02) {
+      // Extra streaks from random points, so the jump reads as a burst.
+      ctx.globalAlpha = warpV;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      for (var k = 0; k < 60; k++) {
+        var ang = k * 2.39996, rad = 40 + (k * 37) % Math.max(w, h);
+        var sx = cx + Math.cos(ang) * rad, sy = cy + Math.sin(ang) * rad;
+        var len = warpV * (30 + rad * .45);
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + Math.cos(ang) * len, sy + Math.sin(ang) * len); ctx.stroke();
+      }
+    }
+    if (!reduced && !shooting && now > nextShot) {
+      shooting = { x: w * (.3 + Math.random() * .7), y: -20, vx: -(.5 + Math.random() * .3), vy: .32 + Math.random() * .15, life: 0 };
+      nextShot = now + 7000 + Math.random() * 10000;
+    }
+    if (shooting) {
+      var sh = shooting;
+      sh.life += dt;
+      sh.x += sh.vx * dt; sh.y += sh.vy * dt;
+      var fade = Math.min(1, sh.life / 150) * Math.max(0, 1 - sh.life / 1100);
+      var tx = sh.x - sh.vx * 180, ty = sh.y - sh.vy * 180;
+      var g = ctx.createLinearGradient(sh.x, sh.y, tx, ty);
+      g.addColorStop(0, 'rgba(255,255,255,' + fade + ')');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(sh.x, sh.y); ctx.lineTo(tx, ty); ctx.stroke();
+      if (sh.life > 1100 || sh.y > h + 40) shooting = null;
+    }
+    ctx.globalAlpha = 1;
+  }
+  var resizeTimer = null;
+  window.addEventListener('resize', function() {
+    if (!enabled) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() { build(); kick(); }, 150);
+  });
+  return {
+    warp: function() { warpV = 1; },
+    setAccent: function(c) { if (c !== accent) { accent = c; if (layers.length) { build(); kick(); } } },
+    setEnabled: function(on) {
+      enabled = on;
+      if (!on) return;
+      if (!layers.length || w !== window.innerWidth || h !== window.innerHeight) build();
+      if (!nextShot) nextShot = performance.now() + 3000;
+      kick();
+    },
+    setMode: function(m) { mode = m; kick(); }, // same modes as orbDust.setMode
+  };
+})();
 
 function setThemeBgFit(fit) {
   state.theme.bgFit = fit;
@@ -1999,8 +2775,8 @@ function renderThemePicker() {
   document.querySelectorAll('.theme-swatch').forEach(function(el) {
     el.classList.toggle('active', el.getAttribute('data-accent') === state.theme.accent);
   });
-  $('theme-custom-color1').value = state.theme.customColor1 || '#7a5cff';
-  $('theme-custom-color2').value = state.theme.customColor2 || '#ff3ea5';
+  $('theme-custom-color1').value = state.theme.customColor1 || '#8b3dff';
+  $('theme-custom-color2').value = state.theme.customColor2 || '#ff2d55';
 }
 
 function setThemeMode(mode) {
@@ -2255,6 +3031,16 @@ $('btn-clear-bg').onclick = function() {
 };
 $('theme-bg-fit-contain').onclick = function() { setThemeBgFit('contain'); };
 $('theme-bg-fit-cover').onclick = function() { setThemeBgFit('cover'); };
+$('theme-anim-toggle').onchange = function() {
+  state.theme.anim = $('theme-anim-toggle').checked;
+  try { localStorage.setItem('themeAnim', state.theme.anim ? '1' : '0'); } catch (e) {}
+  setAnimationsPaused();
+};
+$('theme-space-toggle').onchange = function() {
+  state.theme.space = $('theme-space-toggle').checked;
+  try { localStorage.setItem('themeSpace', state.theme.space ? '1' : '0'); } catch (e) {}
+  applyBackgroundImage();
+};
 document.querySelectorAll('.theme-swatch').forEach(function(el) {
   el.onclick = function() { setThemeAccent(el.getAttribute('data-accent')); };
 });
@@ -2359,11 +3145,12 @@ function setUpReorderableRow(row) {
 
 
 applyTheme();
+setAnimationsPaused();
 applyI18n();
 initReorderableRows();
 refreshProfiles();
 refreshStatus();
-setInterval(refreshStatus, 3000);
+setInterval(refreshStatus, 1000);
 setInterval(checkBackgroundUpdate, 3000);
 // Windows: tell the update window (updatesplash_windows.go) this page has
 // loaded, so it can step aside without exposing a blank window.

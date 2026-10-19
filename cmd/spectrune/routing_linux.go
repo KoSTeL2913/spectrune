@@ -68,6 +68,7 @@ type LinuxBridge struct {
 	mu           sync.Mutex
 	includedApps []string // binary basenames/paths resolved from the profile's IncludedApps desktop IDs
 	stopMatch    chan struct{}
+	since        time.Time // when Start brought the tunnel up, for the GUI's connection timer
 }
 
 func runCmd(name string, args ...string) error {
@@ -215,6 +216,7 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 		b.sniffer = sniffer
 	}
 
+	b.since = time.Now()
 	log.Printf("Spectrune routing up (cgroup %s, fwmark %s), tunnel to %s", cgroupRoot, fwMark, cfg.Endpoint)
 	return nil
 }
@@ -299,17 +301,18 @@ func addPIDToCgroup(pid int) error {
 // HandshakeOK reports whether the WireGuard/AmneziaWG handshake with the
 // peer has actually completed — unchanged from the netns-based version.
 func (b *LinuxBridge) HandshakeOK() bool {
+	ok, _, _ := b.Stats()
+	return ok
+}
+
+// Stats is HandshakeOK plus the tunnel's received/sent byte totals.
+func (b *LinuxBridge) Stats() (handshake bool, rx, tx uint64) {
 	if b.dev == nil {
-		return false
+		return false, 0, 0
 	}
 	state, err := b.dev.IpcGet()
 	if err != nil {
-		return false
+		return false, 0, 0
 	}
-	for _, line := range strings.Split(state, "\n") {
-		if strings.HasPrefix(line, "last_handshake_time_sec=") {
-			return strings.TrimPrefix(line, "last_handshake_time_sec=") != "0"
-		}
-	}
-	return false
+	return uapiStats(state)
 }

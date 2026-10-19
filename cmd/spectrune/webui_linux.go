@@ -78,7 +78,7 @@ func runGUI() {
 	// narrower than that and then immediately snapping wider once the
 	// min-size constraint kicks in was a visible jump on launch
 	// ("у меня прыгает окно", 2026-09-23).
-	w.SetSize(613, 640, webview.HintNone)
+	w.SetSize(613, 700, webview.HintNone)
 
 	bindAPI(w)
 	startHotkeyManager()

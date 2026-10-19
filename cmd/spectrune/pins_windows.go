@@ -49,6 +49,8 @@ const (
 	stgmReadWrite      = 2
 	slgpRawPath        = 4
 	shcneUpdateItem    = 0x2000
+	shcneAssocChanged  = 0x08000000
+	shcnfIDList        = 0
 	shcnfPathW         = 5
 	pathBufLen         = 1024
 )
@@ -141,6 +143,28 @@ func repairPinnedShortcutIcon(lnk, exe string) bool {
 	}
 	procSHChangeNotify.Call(shcneUpdateItem, shcnfPathW, uintptr(unsafe.Pointer(lnkW)), 0)
 	return true
+}
+
+// refreshShellIconsAfterUpdate makes Explorer drop its cached icons once
+// per installed version. The cache is keyed by file path, and the exe path
+// never changes across updates, so after v2.0.60.0 replaced the logo the
+// desktop shortcut and the taskbar button kept showing the old one
+// (confirmed on win11 2026-10-19) until something flushed the cache.
+// Must run before the window is created: the taskbar looks the icon up
+// when the button first appears.
+func refreshShellIconsAfterUpdate() {
+	dir, err := os.UserCacheDir() // %LocalAppData%
+	if err != nil {
+		return
+	}
+	marker := filepath.Join(dir, "Spectrune", "icons-refreshed")
+	if b, err := os.ReadFile(marker); err == nil && string(b) == appVersion {
+		return
+	}
+	procSHChangeNotify.Call(shcneAssocChanged, shcnfIDList, 0, 0)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err == nil {
+		os.WriteFile(marker, []byte(appVersion), 0o600)
+	}
 }
 
 // expandEnv expands %VAR% references, which shortcut paths may contain.

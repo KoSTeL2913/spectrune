@@ -9,11 +9,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -280,6 +283,7 @@ func runGUI(retryMutex bool) {
 
 	registerForRestart()
 	repairAutostartEntry()
+	refreshShellIconsAfterUpdate()
 	go func() {
 		repairPinnedShortcutIcons()
 		// A GUI relaunched mid-upgrade starts before the old product's
@@ -297,8 +301,8 @@ func runGUI(retryMutex bool) {
 		AutoFocus: true,
 		WindowOptions: webview2.WindowOptions{
 			Title:  guiWindowTitle,
-			Width:  560,
-			Height: 640,
+			Width:  600,
+			Height: 700,
 		},
 	})
 	if w == nil {
@@ -391,6 +395,13 @@ func runGUI(retryMutex bool) {
 		// trapping the user with an unreachable window would be worse.
 		log.Printf("tray icon unavailable: %v", err)
 	} else {
+		onMainWindowVisible = func(visible bool) {
+			// Dispatch, not a direct Eval: this runs inside the window
+			// procedure, and Eval re-entering WebView2 from there isn't safe.
+			w.Dispatch(func() {
+				w.Eval(fmt.Sprintf("window.setWindowVisible && setWindowVisible(%t)", visible))
+			})
+		}
 		hideToTrayOnClose(hwnd)
 		stopPoll := make(chan struct{})
 		go pollTrayState(tray, stopPoll)
@@ -429,6 +440,75 @@ func runGUI(retryMutex bool) {
 	time.Sleep(300 * time.Millisecond)
 }
 
+// asyncBindingsJS defines window.<name>(...) for every bindAsync binding:
+// the call starts the Go side through the synchronous __start_<name>
+// binding, which returns at once, and the promise settles when the Go
+// goroutine reports back through __asyncDone.
+const asyncBindingsJS = `(function () {
+	var pending = {}, next = 0;
+	window.__asyncDone = function (id, err, res) {
+		var p = pending[id];
+		delete pending[id];
+		if (!p) return;
+		if (err !== null) p.reject(err); else p.resolve(res);
+	};
+	window.__bindAsync = function (name) {
+		window[name] = function () {
+			var args = Array.prototype.slice.call(arguments);
+			return new Promise(function (resolve, reject) {
+				var id = ++next;
+				pending[id] = { resolve: resolve, reject: reject };
+				window['__start_' + name](id, args).catch(function (e) {
+					delete pending[id];
+					reject(e);
+				});
+			});
+		};
+	};
+})();`
+
+// bindAsync is w.Bind for handlers that may take a while. go-webview2
+// runs bindings synchronously inside WebView2's message handler, on the
+// UI thread, so a slow service call froze the whole window: Connect
+// creating the Wintun adapter took long enough on win10 (2026-10-20) for
+// Windows to mark the window "Не отвечает", with the connecting animation
+// stopped exactly when it should play. fn must return (value, error) or
+// error; it runs on its own goroutine.
+func bindAsync(w webview2.WebView, name string, fn interface{}) error {
+	v := reflect.ValueOf(fn)
+	t := v.Type()
+	w.Init("window.__bindAsync(" + strconv.Quote(name) + ");")
+	return w.Bind("__start_"+name, func(id int, raw []json.RawMessage) error {
+		if len(raw) != t.NumIn() {
+			return fmt.Errorf("%s: want %d arguments, got %d", name, t.NumIn(), len(raw))
+		}
+		args := make([]reflect.Value, len(raw))
+		for i := range raw {
+			p := reflect.New(t.In(i))
+			if err := json.Unmarshal(raw[i], p.Interface()); err != nil {
+				return err
+			}
+			args[i] = p.Elem()
+		}
+		go func() {
+			out := v.Call(args)
+			errV, res := out[len(out)-1], interface{}(nil)
+			if len(out) == 2 {
+				res = out[0].Interface()
+			}
+			js := fmt.Sprintf("window.__asyncDone(%d, null, null)", id)
+			if !errV.IsNil() {
+				msg, _ := json.Marshal(errV.Interface().(error).Error())
+				js = fmt.Sprintf("window.__asyncDone(%d, %s)", id, msg)
+			} else if b, err := json.Marshal(res); err == nil {
+				js = fmt.Sprintf("window.__asyncDone(%d, null, %s)", id, b)
+			}
+			w.Dispatch(func() { w.Eval(js) })
+		}()
+		return nil
+	})
+}
+
 // bindAPI exposes Go functions as window.<name>(...) promises in the page
 // (see jchv/go-webview2's Bind doc — each call is proxied over the
 // WebView2 message channel and JSON-marshaled both ways). Every handler
@@ -439,6 +519,7 @@ func bindAPI(w webview2.WebView) {
 			log.Fatalf("Bind: %v", err)
 		}
 	}
+	w.Init(asyncBindingsJS)
 
 	must(w.Bind("listProfiles", func() ([]string, error) {
 		client, err := ipcDial()
@@ -525,7 +606,7 @@ func bindAPI(w webview2.WebView) {
 		return client.Call("Bridge.RenameProfile", RenameProfileRequest{OldName: oldName, NewName: newName}, &struct{}{})
 	}))
 
-	must(w.Bind("connect", func(name string) error {
+	must(bindAsync(w, "connect", func(name string) error {
 		client, err := ipcDial()
 		if err != nil {
 			return err
@@ -534,7 +615,7 @@ func bindAPI(w webview2.WebView) {
 		return client.Call("Bridge.Connect", name, &struct{}{})
 	}))
 
-	must(w.Bind("disconnect", func() error {
+	must(bindAsync(w, "disconnect", func() error {
 		client, err := ipcDial()
 		if err != nil {
 			return err
@@ -543,7 +624,7 @@ func bindAPI(w webview2.WebView) {
 		return client.Call("Bridge.Disconnect", struct{}{}, &struct{}{})
 	}))
 
-	must(w.Bind("disconnectProfile", func(name string) error {
+	must(bindAsync(w, "disconnectProfile", func(name string) error {
 		client, err := ipcDial()
 		if err != nil {
 			return err
@@ -552,7 +633,7 @@ func bindAPI(w webview2.WebView) {
 		return client.Call("Bridge.DisconnectProfile", name, &struct{}{})
 	}))
 
-	must(w.Bind("getState", func() (*StateReply, error) {
+	must(bindAsync(w, "getState", func() (*StateReply, error) {
 		client, err := ipcDial()
 		if err != nil {
 			return nil, err

@@ -381,20 +381,17 @@ func (t *outboundTunnel) observeDNSResponse(payload []byte) {
 // text output (the same interface `wg show` itself uses) rather than
 // reaching into unexported peer fields.
 func (t *outboundTunnel) hasHandshake() bool {
+	ok, _, _ := t.stats()
+	return ok
+}
+
+// stats is hasHandshake plus the tunnel's received/sent byte totals.
+func (t *outboundTunnel) stats() (handshake bool, rx, tx uint64) {
 	uapi, err := t.dev.IpcGet()
 	if err != nil {
-		return false
+		return false, 0, 0
 	}
-	for _, line := range strings.Split(uapi, "\n") {
-		sec, ok := strings.CutPrefix(line, "last_handshake_time_sec=")
-		if !ok {
-			continue
-		}
-		if sec != "" && sec != "0" {
-			return true
-		}
-	}
-	return false
+	return uapiStats(uapi)
 }
 
 func (t *outboundTunnel) dial(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {

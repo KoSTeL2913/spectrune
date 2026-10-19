@@ -175,8 +175,9 @@ type trackedConn struct {
 
 // namedTunnel is one connected profile's outbound tunnel.
 type namedTunnel struct {
-	name string
-	t    *outboundTunnel
+	name  string
+	t     *outboundTunnel
+	since time.Time // when it was added, for the GUI's connection timer
 }
 
 // startBridge brings a bridge up with name's tunnel (built from cfg) as
@@ -236,7 +237,7 @@ func (b *Bridge) addTunnel(name string, outTun *outboundTunnel) {
 		}
 	}
 	b.tunMu.Lock()
-	b.tunnels = append(b.tunnels, &namedTunnel{name: name, t: outTun})
+	b.tunnels = append(b.tunnels, &namedTunnel{name: name, t: outTun, since: time.Now()})
 	b.tunMu.Unlock()
 	b.syncFullTunnelExtras()
 	// Connections already open on another path that this tunnel now
@@ -658,6 +659,10 @@ type TunnelState struct {
 	Name string
 	// HandshakeOK — see outboundTunnel.hasHandshake's doc.
 	HandshakeOK bool
+	// RxBytes/TxBytes are the tunnel's traffic totals and Since its
+	// connect time (unix seconds) — the GUI's speed and timer readouts.
+	RxBytes, TxBytes uint64
+	Since            int64
 }
 
 // TunnelStates reports every connected tunnel's handshake status, in
@@ -668,7 +673,8 @@ func (b *Bridge) TunnelStates() []TunnelState {
 	b.tunMu.RUnlock()
 	states := make([]TunnelState, len(tunnels))
 	for i, nt := range tunnels {
-		states[i] = TunnelState{Name: nt.name, HandshakeOK: nt.t.hasHandshake()}
+		ok, rx, tx := nt.t.stats()
+		states[i] = TunnelState{Name: nt.name, HandshakeOK: ok, RxBytes: rx, TxBytes: tx, Since: nt.since.Unix()}
 	}
 	return states
 }
