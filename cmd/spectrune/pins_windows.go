@@ -62,7 +62,10 @@ func comCall(obj uintptr, slot int, args ...uintptr) uintptr {
 	return r
 }
 
-func repairPinnedShortcutIcons() {
+// repairPinnedShortcutIcons points pins whose icon file is gone back at
+// spectrune.exe; with force, every pin of spectrune.exe is rewritten and
+// re-announced so the taskbar reloads its icon after an update.
+func repairPinnedShortcutIcons(force bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -90,13 +93,13 @@ func repairPinnedShortcutIcons() {
 	defer windows.CoUninitialize()
 
 	for _, lnk := range lnks {
-		if repairPinnedShortcutIcon(lnk, exe) {
+		if repairPinnedShortcutIcon(lnk, exe, force) {
 			log.Printf("repaired icon of pinned shortcut %s", lnk)
 		}
 	}
 }
 
-func repairPinnedShortcutIcon(lnk, exe string) bool {
+func repairPinnedShortcutIcon(lnk, exe string, force bool) bool {
 	var sl uintptr
 	if r, _, _ := procCoCreateInstance.Call(uintptr(unsafe.Pointer(&clsidShellLink)), 0, clsctxInprocServer,
 		uintptr(unsafe.Pointer(&iidIShellLinkW)), uintptr(unsafe.Pointer(&sl))); r != 0 || sl == 0 {
@@ -125,12 +128,14 @@ func repairPinnedShortcutIcon(lnk, exe string) bool {
 	if comCall(sl, slGetIconLocation, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&idx))) != 0 {
 		return false
 	}
-	icon := windows.UTF16ToString(buf)
-	if icon == "" {
-		return false
-	}
-	if _, err := os.Stat(expandEnv(icon)); err == nil {
-		return false
+	if !force {
+		icon := windows.UTF16ToString(buf)
+		if icon == "" {
+			return false
+		}
+		if _, err := os.Stat(expandEnv(icon)); err == nil {
+			return false
+		}
 	}
 
 	exeW, _ := windows.UTF16PtrFromString(exe)
@@ -145,26 +150,32 @@ func repairPinnedShortcutIcon(lnk, exe string) bool {
 	return true
 }
 
-// refreshShellIconsAfterUpdate makes Explorer drop its cached icons once
-// per installed version. The cache is keyed by file path, and the exe path
-// never changes across updates, so after v2.0.60.0 replaced the logo the
-// desktop shortcut and the taskbar button kept showing the old one
-// (confirmed on win11 2026-10-19) until something flushed the cache.
-// Must run before the window is created: the taskbar looks the icon up
-// when the button first appears.
-func refreshShellIconsAfterUpdate() {
+// firstRunOfVersion reports whether this is the first GUI start of the
+// installed version for this user, and remembers that it no longer is.
+func firstRunOfVersion() bool {
 	dir, err := os.UserCacheDir() // %LocalAppData%
 	if err != nil {
-		return
+		return false
 	}
 	marker := filepath.Join(dir, "Spectrune", "icons-refreshed")
 	if b, err := os.ReadFile(marker); err == nil && string(b) == appVersion {
-		return
+		return false
 	}
-	procSHChangeNotify.Call(shcneAssocChanged, shcnfIDList, 0, 0)
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err == nil {
 		os.WriteFile(marker, []byte(appVersion), 0o600)
 	}
+	return true
+}
+
+// flushShellIcons makes Explorer drop its cached icons. The cache is keyed
+// by file path, and the exe path never changes across updates, so after
+// v2.0.60.0 replaced the logo the desktop shortcut and the taskbar button
+// kept showing the old one until something flushed it (win11 2026-10-19).
+// Once is not enough for a taskbar pin: a GUI relaunched by the update
+// flushed before the MSI had finished and the pin stayed old on mainpc
+// (2026-10-20), so the caller repeats it once the install is surely done.
+func flushShellIcons() {
+	procSHChangeNotify.Call(shcneAssocChanged, shcnfIDList, 0, 0)
 }
 
 // expandEnv expands %VAR% references, which shortcut paths may contain.

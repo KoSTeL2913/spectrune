@@ -70,8 +70,8 @@
   reinstalled correctly.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <?define ProductCode = "E3D6770A-CC32-42E7-9870-F57BBE1E27CF" ?>
-  <?define ProductVersion = "2.0.60.0" ?>
+  <?define ProductCode = "94EE9617-D77F-4456-AF6B-1D3C6BEC9A28" ?>
+  <?define ProductVersion = "2.0.61.0" ?>
   <!--
     Name includes the version deliberately — [ProductName] is what every
     bundled wizard dialog's title bar and "Welcome to the ... Setup
@@ -198,7 +198,7 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Spectrune">
-          <Component Id="SpectruneExeComponent" Guid="88CE39B8-78D4-4E13-9E39-C1ABA398AE8E" Win64="yes">
+          <Component Id="SpectruneExeComponent" Guid="E6A582DF-7B20-440D-B1AE-AEDEFD67AEA6" Win64="yes">
             <!-- DefaultVersion: wixl leaves the File table's Version column
                  empty (it doesn't read the exe's VERSIONINFO), so MSI saw
                  the new spectrune.exe as UNVERSIONED. Any versioned exe
@@ -250,7 +250,7 @@
       </Directory>
 
       <Directory Id="DesktopFolder" Name="Desktop">
-        <Component Id="DesktopShortcutComponent" Guid="0CE369EC-0E17-421B-8694-8479D0901274" Win64="yes">
+        <Component Id="DesktopShortcutComponent" Guid="11A74653-61B2-4EC8-97C9-E4A067CE9CA4" Win64="yes">
           <Shortcut Id="SpectruneDesktopShortcut"
                     Name="Spectrune"
                     Description="Per-application VPN routing"
@@ -274,7 +274,7 @@
            bare shortcut into the root Programs list. -->
       <Directory Id="ProgramMenuFolder">
         <Directory Id="SpectruneProgramMenuFolder" Name="Spectrune">
-          <Component Id="StartMenuShortcutComponent" Guid="A7B4C35B-EC6B-422A-A013-5C6E845D201D" Win64="yes">
+          <Component Id="StartMenuShortcutComponent" Guid="062F1198-76DA-4201-BF2F-86CCE6A72B02" Win64="yes">
             <Shortcut Id="SpectruneStartMenuShortcut"
                       Name="Spectrune"
                       Description="Per-application VPN routing"

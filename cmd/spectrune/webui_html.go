@@ -545,6 +545,16 @@ const webUIHTML = `<!DOCTYPE html>
   }
   body.space-on .profile-row:hover { border-color: rgba(255, 255, 255, .18); }
   body.space-on .profile-row.selected { border-color: color-mix(in srgb, var(--accent) 65%, transparent); }
+  /* Stars over a background photo: just the starfield canvas, no nebulae
+     or dark sky, so the photo stays the background. The panels drop
+     has-bg-image's backdrop blur for the same reason as space-on above
+     and get more opaque instead, so the stars pass behind them. */
+  body.stars-on .space { display: block; }
+  body.stars-on .panel,
+  body.stars-on .profile-row {
+    background: color-mix(in srgb, var(--surface) 86%, transparent); backdrop-filter: none;
+  }
+  body.stars-on .profile-row.is-on { background: color-mix(in srgb, var(--accent) 22%, color-mix(in srgb, var(--surface) 84%, transparent)); }
   /* Only the endless animations — pausing the one-shot entrance ones
      would freeze them on their first, invisible frame. */
   body.paused .orb-ring, body.paused .status-text::before,
@@ -918,7 +928,7 @@ var I18N = {
     themeCustomColors: 'Custom colors (full RGB)', themeBackground: 'Background photo',
     themeChooseBg: 'Choose photo…', themeClearBg: 'Clear',
     themeBgFit: 'Fit', themeBgFitContain: 'Whole photo', themeBgFitCover: 'Fill (crop)',
-    themeSpace: 'Space background', themeAnim: 'Animations',
+    themeSpace: 'Space background', themeStars: 'Stars over the photo', themeAnim: 'Animations',
     domainLists: 'Domain lists',
     domainsHint: 'Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list\'s domains with "Edit".',
     domainsNewList: 'New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
@@ -984,7 +994,7 @@ var I18N = {
     themeCustomColors: 'Свои цвета (вся RGB-палитра)', themeBackground: 'Фоновое фото',
     themeChooseBg: 'Выбрать фото…', themeClearBg: 'Очистить',
     themeBgFit: 'Заполнение', themeBgFitContain: 'Целиком', themeBgFitCover: 'На весь экран (обрезка)',
-    themeSpace: 'Космический фон', themeAnim: 'Анимации',
+    themeSpace: 'Космический фон', themeStars: 'Звёзды поверх фото', themeAnim: 'Анимации',
     domainLists: 'Списки доменов',
     domainsHint: 'Включите список, чтобы направить все его домены через этот туннель — независимо от того, какое приложение к ним обращается. Кнопка «Изменить» редактирует домены списка.',
     domainsNewList: 'Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
@@ -2599,14 +2609,20 @@ function applyBackgroundImage() {
   }
   $('theme-bg-fit-contain').classList.toggle('active', (state.theme.bgFit || 'contain') === 'contain');
   $('theme-bg-fit-cover').classList.toggle('active', state.theme.bgFit === 'cover');
-  // The space background is a dark-theme look, and a background photo
-  // replaces it.
+  // The space background is a dark-theme look. Under a background photo
+  // the same switch keeps only the moving stars, over the photo, in
+  // either theme.
   var spaceOn = state.theme.space && state.theme.mode !== 'light' && !state.theme.bgImage;
+  var starsOn = state.theme.space && !!state.theme.bgImage;
   document.body.classList.toggle('space-on', spaceOn);
+  document.body.classList.toggle('stars-on', starsOn);
   $('theme-space-toggle').checked = state.theme.space;
   $('theme-anim-toggle').checked = state.theme.anim;
-  $('theme-space-row').style.display = state.theme.mode === 'light' ? 'none' : 'flex';
-  starfield.setEnabled(spaceOn);
+  $('theme-space-row').style.display = state.theme.mode === 'light' && !state.theme.bgImage ? 'none' : 'flex';
+  var label = $('theme-space-row').querySelector('.theme-panel-label');
+  label.dataset.i18n = state.theme.bgImage ? 'themeStars' : 'themeSpace';
+  label.textContent = t(label.dataset.i18n);
+  starfield.setEnabled(spaceOn || starsOn, starsOn);
 }
 
 // ---------- starfield ----------
@@ -2626,6 +2642,7 @@ var starfield = (function() {
   var enabled = false, mode = 'run', last = 0, tickN = 0, speed = 1;
   var warpV = 0; // >0 right after a connect: stars streak out from the centre
   var accent = '#8b3dff';
+  var bright = false; // over a background photo: bigger stars with a halo
   var LAYERS = [ // depth: star count per 100k px², radius, alpha, drift px/s
     { density: 14, r: .45, a: .5, v: 3 },
     { density: 5, r: .8, a: .75, v: 7 },
@@ -2646,17 +2663,26 @@ var starfield = (function() {
       c.scale(dpr, dpr);
       var n = Math.round(w * h / 100000 * L.density);
       for (var i = 0; i < n; i++) {
-        c.globalAlpha = L.a * (.5 + Math.random() * .5);
+        var x = Math.random() * w, y = Math.random() * h;
+        var r = L.r * (.7 + Math.random() * .6) * (bright ? 1.5 : 1);
+        var a = L.a * (.5 + Math.random() * .5);
         c.fillStyle = starColor();
+        if (bright) {
+          // A soft halo so the star still reads over a light photo.
+          c.globalAlpha = a * .22;
+          c.beginPath(); c.arc(x, y, r * 2.2, 0, Math.PI * 2); c.fill();
+          a = Math.min(1, a + .25);
+        }
+        c.globalAlpha = a;
         c.beginPath();
-        c.arc(Math.random() * w, Math.random() * h, L.r * (.7 + Math.random() * .6), 0, Math.PI * 2);
+        c.arc(x, y, r, 0, Math.PI * 2);
         c.fill();
       }
       return { img: img, v: L.v, off: 0 };
     });
     twinklers = [];
     for (var i = 0; i < 28; i++) {
-      twinklers.push({ x: Math.random() * w, y: Math.random() * h, r: .9 + Math.random() * .9,
+      twinklers.push({ x: Math.random() * w, y: Math.random() * h, r: (.9 + Math.random() * .9) * (bright ? 1.4 : 1),
         tw: Math.random() * Math.PI * 2, tws: .8 + Math.random() * 2, c: starColor() });
     }
   }
@@ -2752,10 +2778,13 @@ var starfield = (function() {
   return {
     warp: function() { warpV = 1; },
     setAccent: function(c) { if (c !== accent) { accent = c; if (layers.length) { build(); kick(); } } },
-    setEnabled: function(on) {
+    setEnabled: function(on, overPhoto) {
       enabled = on;
       if (!on) return;
-      if (!layers.length || w !== window.innerWidth || h !== window.innerHeight) build();
+      if (!layers.length || w !== window.innerWidth || h !== window.innerHeight || bright !== !!overPhoto) {
+        bright = !!overPhoto;
+        build();
+      }
       if (!nextShot) nextShot = performance.now() + 3000;
       kick();
     },

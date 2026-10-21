@@ -283,15 +283,26 @@ func runGUI(retryMutex bool) {
 
 	registerForRestart()
 	repairAutostartEntry()
-	refreshShellIconsAfterUpdate()
+	// Must flush before the window is created: the taskbar looks the
+	// button's icon up when it first appears.
+	updated := firstRunOfVersion()
+	if updated {
+		flushShellIcons()
+	}
 	go func() {
-		repairPinnedShortcutIcons()
+		repairPinnedShortcutIcons(false)
 		// A GUI relaunched mid-upgrade starts before the old product's
 		// removal deletes its icon folder (RemoveExistingProducts runs
 		// after InstallExecute, see spectrune.wxs), so that first pass
-		// still sees the pin's icon as valid — look once more later.
-		time.Sleep(3 * time.Minute)
-		repairPinnedShortcutIcons()
+		// still sees the pin's icon as valid — look again later, and
+		// refresh icons again once the install has surely finished.
+		for _, d := range []time.Duration{20 * time.Second, 3 * time.Minute} {
+			time.Sleep(d)
+			repairPinnedShortcutIcons(updated)
+			if updated {
+				flushShellIcons()
+			}
+		}
 	}()
 
 	// Created off screen and centered once the page has painted (uiReady
