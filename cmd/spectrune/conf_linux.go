@@ -15,7 +15,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/netip"
 	"strings"
+	"time"
 )
 
 // LinuxConfig mirrors just the fields Spectrune Linux actually uses — one
@@ -178,11 +181,56 @@ func (c *LinuxConfig) ToUAPI() (string, error) {
 		}
 		fmt.Fprintf(&b, "preshared_key=%s\n", pskHex)
 	}
-	fmt.Fprintf(&b, "endpoint=%s\n", c.Endpoint)
+	endpoint, err := resolveEndpoint(c.Endpoint)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
 	for _, ip := range c.AllowedIPs {
 		fmt.Fprintf(&b, "allowed_ip=%s\n", ip)
 	}
 	return b.String(), nil
+}
+
+// resolveEndpoint turns "host:port" into "ip:port" — the UAPI only takes
+// addresses, and a hostname failed with "ParseAddr: unexpected character"
+// (reported 2026-10-23, the first config with a domain endpoint). Windows
+// gets this from conf.ToUAPI's own resolver. IPv4 is preferred, as the
+// tunnel and its bypass routing are IPv4. A few retries cover the network
+// still coming up right after boot or wake.
+func resolveEndpoint(endpoint string) (string, error) {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("Endpoint %q: %w", endpoint, err)
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return endpoint, nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var v6 net.IP
+		for _, ip := range ips {
+			if ip.To4() != nil {
+				return net.JoinHostPort(ip.String(), port), nil
+			}
+			if v6 == nil {
+				v6 = ip
+			}
+		}
+		if v6 != nil {
+			return net.JoinHostPort(v6.String(), port), nil
+		}
+		lastErr = fmt.Errorf("no addresses")
+	}
+	return "", fmt.Errorf("Endpoint %s: can't resolve %s: %w", endpoint, host, lastErr)
 }
 
 // ToWgQuick renders back to the on-disk file format — used by SaveProfile.

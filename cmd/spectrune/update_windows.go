@@ -213,7 +213,20 @@ var pendingInstall struct {
 	ready        bool // MSI downloaded and tag recorded
 	requested    bool // TriggerInstall called — install as soon as ready
 	requestedAt  time.Time
-	scheduled    bool // install bat scheduled; never schedule twice
+	scheduled    bool      // install bat scheduled; never schedule twice
+	deferUntil   time.Time // DeferInstall: the user is in a game, hold off
+}
+
+// DeferInstall holds a downloaded automatic update back for a minute; the
+// GUI keeps calling it while the user is in a game or another full-screen
+// app (userbusy_windows.go), since the install drops every tunnel and
+// restarts the GUI. Only the headless fallback below honors it: anything
+// that calls TriggerInstall has already decided to go ahead.
+func (s *Service) DeferInstall(_ struct{}, _ *struct{}) error {
+	pendingInstall.Lock()
+	pendingInstall.deferUntil = time.Now().Add(time.Minute)
+	pendingInstall.Unlock()
+	return nil
 }
 
 // scheduleIfRequested schedules the pending install if it's downloaded
@@ -231,7 +244,18 @@ func scheduleIfRequested(force bool) bool {
 	if err := scheduleInstall(tag, msiPath, 2); err != nil {
 		log.Printf("update check: scheduling install failed: %v", err)
 		updateInProgress.Store(false)
+		return true
 	}
+	// Watchdog: if the install task fails silently and the service is still
+	// alive 90s later, clear updateInProgress so the next check can retry.
+	// Started only now: while the update waits (deferred, or the GUI hasn't
+	// asked yet) the flag must stay set, it's what the GUI watches.
+	go func() {
+		time.Sleep(90 * time.Second)
+		if updateInProgress.Swap(false) {
+			log.Printf("update check: install process did not restart service within 90s — likely failed, clearing update flag")
+		}
+	}()
 	return true
 }
 
@@ -304,24 +328,21 @@ func installRelease(release *ghRelease) {
 	// stray spectrune.exe process).
 	go func() {
 		time.Sleep(30 * time.Second)
-		if !scheduleIfRequested(true) {
-			return // already scheduled via TriggerInstall
-		}
-		log.Printf("update check: GUI did not trigger install within 30s, proceeded headlessly")
-		go func() {
-			time.Sleep(90 * time.Second)
-			if updateInProgress.Swap(false) {
-				log.Printf("update check: headless install did not restart service within 90s — likely failed, clearing flag")
+		for {
+			pendingInstall.Lock()
+			scheduled, wait := pendingInstall.scheduled, time.Until(pendingInstall.deferUntil)
+			pendingInstall.Unlock()
+			if scheduled {
+				return // already scheduled via TriggerInstall
 			}
-		}()
-	}()
-
-	// Watchdog: if the install task fails silently and the service is still
-	// alive 90s later, clear updateInProgress so the next check can retry.
-	go func() {
-		time.Sleep(90 * time.Second)
-		if updateInProgress.Swap(false) {
-			log.Printf("update check: install process did not restart service within 90s — likely failed, clearing update flag")
+			if wait > 0 {
+				time.Sleep(wait) // the GUI says the user is in a game
+				continue
+			}
+			if scheduleIfRequested(true) {
+				log.Printf("update check: GUI did not trigger install within 30s, proceeded headlessly")
+			}
+			return
 		}
 	}()
 }

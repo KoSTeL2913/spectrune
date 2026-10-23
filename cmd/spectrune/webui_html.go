@@ -1191,11 +1191,15 @@ function renderSpeed() {
 // reports the page hidden. Windows' WebView2 keeps rendering a hidden
 // window, so webui_windows.go calls window.setWindowVisible from the
 // window's show/hide/minimize messages.
-var windowHidden = false;
+var windowHidden = !!window.__startHidden; // see runGUI's relaunchTray
 var reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// While another window has the focus (the user is in a game or another
+// app with Spectrune still on screen), everything freezes too — the
+// animations are for looking at, not for costing CPU in the background.
+var windowFocused = document.hasFocus();
 function setAnimationsPaused() {
   var hidden = windowHidden || document.hidden;
-  var off = !state.theme.anim || reducedMotion;
+  var off = !state.theme.anim || reducedMotion || !windowFocused;
   document.body.classList.toggle('paused', hidden || off);
   var mode = hidden ? 'stop' : off ? 'still' : 'run';
   orbDust.setMode(mode);
@@ -1203,6 +1207,8 @@ function setAnimationsPaused() {
 }
 window.setWindowVisible = function(visible) { windowHidden = !visible; setAnimationsPaused(); };
 document.addEventListener('visibilitychange', setAnimationsPaused);
+window.addEventListener('focus', function() { windowFocused = true; setAnimationsPaused(); });
+window.addEventListener('blur', function() { windowFocused = false; setAnimationsPaused(); });
 
 // celebrateConnect plays when a tunnel's handshake completes: the logo's
 // dust bursts outward, the stars jump to warp, and the hero flashes.
@@ -2018,7 +2024,7 @@ function openAppsPicker() {
   state.includedAppsSnapshot = state.includedApps.slice();
   show('view-apps');
   state.takenApps = {};
-  loadTakenApps().then(renderAppsList);
+  loadTakenApps().then(function() { renderAppsList(true); });
   listInstalledApps().then(function(apps) {
     state.installedApps = apps || [];
     // Keep any included paths that aren't in the discovered list (e.g. an
@@ -2031,7 +2037,7 @@ function openAppsPicker() {
         state.installedApps.push({ Name: p, Path: p });
       }
     });
-    renderAppsList();
+    renderAppsList(true);
   }).catch(showEditError);
   refreshAppPresets();
 }
@@ -2092,7 +2098,7 @@ $('btn-load-preset').onclick = function() {
   if (!name) { showEditError(t('presetSelectFirst')); return; }
   loadAppPreset(name).then(function(apps) {
     state.includedApps = apps || [];
-    renderAppsList();
+    renderAppsList(true);
     updateAppsCount();
   }).catch(showEditError);
 };
@@ -2115,12 +2121,20 @@ $('btn-delete-preset').onclick = function() {
   });
 };
 
-function renderAppsList() {
+// appsOnTop is the selection renderAppsList last sorted by: selected
+// apps come first, but a click only re-checks a row and doesn't re-sort,
+// so the row doesn't jump away from under the cursor. resort takes the
+// current selection as the new order (opening the list, searching,
+// loading a preset...).
+var appsOnTop = {};
+
+function renderAppsList(resort) {
   var ul = $('apps-list');
   ul.innerHTML = '';
   var filter = state.appsFilter.toLowerCase();
   var includedSet = {};
   state.includedApps.forEach(function(p) { includedSet[p.toLowerCase()] = true; });
+  if (resort) appsOnTop = Object.assign({}, includedSet);
 
   var takenBy = {};
   state.installedApps.forEach(function(a) {
@@ -2135,6 +2149,9 @@ function renderAppsList() {
       if (isTakenApp(a.Path, includedSet)) return false;
       if (!filter) return true;
       return a.Name.toLowerCase().indexOf(filter) !== -1 || a.Path.toLowerCase().indexOf(filter) !== -1;
+    })
+    .sort(function(x, y) {
+      return (appsOnTop[x.Path.toLowerCase()] ? 0 : 1) - (appsOnTop[y.Path.toLowerCase()] ? 0 : 1);
     })
     .forEach(function(a) {
       var li = document.createElement('li');
@@ -2223,7 +2240,7 @@ function toggleApp(path) {
   updateAppsCount();
 }
 
-$('apps-search').oninput = function() { state.appsFilter = $('apps-search').value; renderAppsList(); };
+$('apps-search').oninput = function() { state.appsFilter = $('apps-search').value; renderAppsList(true); };
 $('btn-select-all').onclick = function() {
   var includedSet = {};
   state.includedApps.forEach(function(p) { includedSet[p.toLowerCase()] = true; });
@@ -2507,34 +2524,44 @@ var orbDust = (function() {
   }
   // One step per animTicker tick (the per-step amounts below are sized
   // for its ~24 fps).
+  // Every other tick (~12 fps, each step moving twice as far) while
+  // nothing is happening; every tick while connecting or bursting, when the
+  // dust moves fast enough to need it. Frames are what cost (each one
+  // recomposites the window), so halving them roughly halves the load.
+  var tickN = 0;
   animTicker.add(function() {
     if (mode !== 'run') return false;
-    step(false);
+    tickN++;
+    var fast = burst > .01 || $('hero').classList.contains('connecting');
+    if (fast) step(false, 1);
+    else if (tickN % 2 === 0) step(false, 2);
     return true;
   });
   // drawStill paints the dust unmoving, in the current state's colors —
   // a few steps so it shows at full strength.
   function drawStill() {
-    for (var k = 0; k < 6; k++) step(true);
+    for (var k = 0; k < 6; k++) step(true, 1);
   }
-  function step(frozen) {
+  // n is how many ~24 fps frames this step stands for.
+  function step(frozen, n) {
     var hero = $('hero');
     var target = hero.classList.contains('on') ? { speed: 1, glow: 1, tint: 1 }
       : hero.classList.contains('connecting') ? { speed: 3, glow: .8, tint: 1 }
       : { speed: .22, glow: .28, tint: 0 };
-    ['speed', 'glow', 'tint'].forEach(function(k) { cur[k] = frozen ? target[k] : cur[k] + (target[k] - cur[k]) * .1; });
-    burst *= .885;
+    ['speed', 'glow', 'tint'].forEach(function(k) { cur[k] = frozen ? target[k] : cur[k] + (target[k] - cur[k]) * (1 - Math.pow(.9, n)); });
+    burst *= Math.pow(.885, n);
     if (canvas.width !== Math.round(SIZE * (window.devicePixelRatio || 1))) resize();
     var light = document.documentElement.classList.contains('light');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // Fade the previous frame instead of clearing it — that's the trail.
     ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = 'rgba(0,0,0,' + (.36 + .18 * (1 - cur.speed / 3)) + ')';
+    var fade = .36 + .18 * (1 - cur.speed / 3);
+    ctx.fillStyle = 'rgba(0,0,0,' + (1 - Math.pow(1 - fade, n)) + ')';
     ctx.fillRect(0, 0, SIZE, SIZE);
     ctx.globalCompositeOperation = light ? 'source-over' : 'lighter';
     var c = SIZE / 2, t = Date.now() / 1000;
     parts.forEach(function(p) {
-      if (!frozen) p.a += p.v * 2.5 * (cur.speed + burst * 7);
+      if (!frozen) p.a += p.v * 2.5 * n * (cur.speed + burst * 7);
       var r = p.r + Math.sin(t * .8 + p.wob) * 2.5 + burst * (18 + p.size * 16);
       var x = c + Math.cos(p.a) * r, y = c + Math.sin(p.a) * r;
       // Dimmer toward the outer edge so the cloud has no hard rim.
@@ -2630,7 +2657,7 @@ function applyBackgroundImage() {
 // tunnel is up), a few twinkling, plus an occasional shooting star.
 // Cheap by design: each depth is drawn once into its own off-screen
 // canvas and then only blitted at an offset, so a frame is three image
-// copies plus a few dozen dots — at ~15 fps, and none at all while the
+// copies plus a few dozen dots — at ~6 fps, and none at all while the
 // window is hidden (see setAnimationsPaused).
 var starfield = (function() {
   var canvas = $('space');
@@ -2653,7 +2680,7 @@ var starfield = (function() {
     return t < .1 ? accent : t < .35 ? 'rgb(170,195,255)' : '#fff';
   }
   function build() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = Math.min(window.devicePixelRatio || 1, 1.25);
     w = window.innerWidth; h = window.innerHeight;
     canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
     layers = LAYERS.map(function(L) {
@@ -2686,12 +2713,13 @@ var starfield = (function() {
         tw: Math.random() * Math.PI * 2, tws: .8 + Math.random() * 2, c: starColor() });
     }
   }
-  // Every other animTicker tick (~12 fps) for the slow drift; every tick
+  // Every fourth animTicker tick (~6 fps, on a frame the dust draws anyway)
+  // for the slow drift — a few px/s doesn't need more; every tick
   // while a warp or shooting star is moving fast.
   animTicker.add(function(now) {
     if (!enabled || mode !== 'run') return false;
     tickN++;
-    if (!(warpV > .02 || shooting) && tickN % 2) return true;
+    if (!(warpV > .02 || shooting) && tickN % 4) return true;
     var dt = last ? Math.min(now - last, 250) : 0;
     last = now;
     paint(dt, false, now);
@@ -2985,8 +3013,14 @@ function checkBackgroundUpdate() {
   if (backgroundUpdateHandled) return;
   getUpdateInProgress().then(function(installing) {
     if (installing) {
-      triggerCloseForUpdate(true);
-      return;
+      // Windows: not while a game or another full-screen app is running —
+      // the install drops the VPN for up to a minute. Ask the service to
+      // wait and look again on the next poll.
+      var busy = window.isUserBusy ? isUserBusy() : Promise.resolve(false);
+      return busy.then(function(b) {
+        if (b) return deferUpdate();
+        triggerCloseForUpdate(true);
+      });
     }
     // Fallback: a small package on a fast connection can finish the
     // whole download+install+restart cycle in well under one 3s poll

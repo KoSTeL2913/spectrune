@@ -63,8 +63,13 @@ const (
 // through a JSON file next to the copied exe (one Scheduled Task /tr
 // string can't carry it without a quoting minefield).
 type updateSplashInfo struct {
-	Mode       string
-	ExePath    string // installed spectrune.exe to relaunch
+	Mode    string
+	ExePath string // installed spectrune.exe to relaunch
+	// Relaunch is the GUI's mode after the update (relaunchModeForUpdate).
+	// Anything but relaunchNormal means the user is busy elsewhere, so no
+	// update window is shown at all — this process only waits for the
+	// install and reopens the GUI.
+	Relaunch   string
 	OldVersion string // the version being replaced, for the "done" check
 	GUIRect    winRect
 
@@ -110,6 +115,9 @@ const (
 	swpNoZOrder      = 0x0004
 	swpFrameChg      = 0x0020
 	swpShowWin       = 0x0040
+	swpHideWin       = 0x0080
+	swpNoActivate    = 0x0010
+	hwndBottom       = 1
 	smCxScreen       = 0
 	smCyScreen       = 1
 	smXVirtualScreen = 76
@@ -130,7 +138,7 @@ func updateSplashDir() (string, error) {
 // launchUpdateSplash copies the running exe, writes the info file, starts
 // the copy through a Scheduled Task and returns once its window has
 // painted (or after a timeout — the caller closes the GUI either way).
-func launchUpdateSplash(mode string, guiHwnd uintptr) error {
+func launchUpdateSplash(mode string, guiHwnd uintptr, relaunch string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
@@ -150,6 +158,7 @@ func launchUpdateSplash(mode string, guiHwnd uintptr) error {
 	info.Mode = mode
 	info.ExePath = exePath
 	info.OldVersion = appVersion
+	info.Relaunch = relaunch
 	procGetWindowRect.Call(guiHwnd, uintptr(unsafe.Pointer(&info.GUIRect)))
 	data, err := json.Marshal(info)
 	if err != nil {
@@ -174,7 +183,9 @@ func launchUpdateSplash(mode string, guiHwnd uintptr) error {
 	// This GUI is about to go away; its ready event must not make the
 	// update window think the relaunched GUI is already up.
 	closeGUIReadyEvent()
-	waitForWindow(info.Title, 15*time.Second)
+	if relaunch == relaunchNormal {
+		waitForWindow(info.Title, 15*time.Second)
+	}
 	return nil
 }
 
@@ -345,14 +356,18 @@ func runUpdateSplash() {
 		bg = "FFFFFFFF"
 	}
 	os.Setenv("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", bg)
-	w, hwnd := newOffscreenWebview(webview2.WebViewOptions{
-		DataPath: filepath.Join(dir, "update-splash-webview"),
-		WindowOptions: webview2.WindowOptions{
-			Title:  splashLoadingTitle,
-			Width:  splashWidth,
-			Height: splashHeight,
-		},
-	})
+	var w webview2.WebView
+	var hwnd uintptr
+	if info.Relaunch == relaunchNormal {
+		w, hwnd = newOffscreenWebview(webview2.WebViewOptions{
+			DataPath: filepath.Join(dir, "update-splash-webview"),
+			WindowOptions: webview2.WindowOptions{
+				Title:  splashLoadingTitle,
+				Width:  splashWidth,
+				Height: splashHeight,
+			},
+		})
+	}
 	if w != nil {
 		makeSplashWindow(hwnd)
 	}
@@ -385,7 +400,11 @@ func runUpdateSplash() {
 				}
 			}
 		}
-		if err := exec.Command(info.ExePath, "/gui-restart").Start(); err != nil {
+		args := []string{"/gui-restart"}
+		if info.Relaunch != relaunchNormal {
+			args = append(args, info.Relaunch)
+		}
+		if err := exec.Command(info.ExePath, args...).Start(); err != nil {
 			log.Printf("update splash: relaunch: %v", err)
 			return
 		}
@@ -393,7 +412,7 @@ func runUpdateSplash() {
 	}()
 
 	if w == nil {
-		<-done // no WebView2 — still update and relaunch, just without a window
+		<-done // silent, or no WebView2 — still update and relaunch, just without a window
 		return
 	}
 	var revealOnce sync.Once
@@ -473,15 +492,25 @@ func makeSplashWindow(hwnd uintptr) {
 // revealMainWindow moves the main GUI, created off screen by
 // newOffscreenWebview, to the center of the screen once its page has
 // painted (uiReady) — or after a fallback timeout.
-func revealMainWindow(hwnd uintptr) {
+// mode is guiStartMode: after an update the user wasn't watching, the
+// window reopens behind everything else (relaunchQuiet) or stays hidden
+// in the tray (relaunchTray) instead of jumping to the front.
+func revealMainWindow(hwnd uintptr, mode string) {
 	var r winRect
 	procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
 	w, h := r.Right-r.Left, r.Bottom-r.Top
 	sw, _, _ := procGetSystemMetrics.Call(smCxScreen)
 	sh, _, _ := procGetSystemMetrics.Call(smCyScreen)
 	x, y := (int32(sw)-w)/2, (int32(sh)-h)/2
-	procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpShowWin)
-	forceForeground(hwnd)
+	switch mode {
+	case relaunchTray:
+		procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpNoZOrder|swpNoActivate|swpHideWin)
+	case relaunchQuiet:
+		procSetWindowPos.Call(hwnd, hwndBottom, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpNoActivate|swpShowWin)
+	default:
+		procSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpShowWin)
+		forceForeground(hwnd)
+	}
 }
 
 type createStruct struct {

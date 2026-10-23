@@ -133,6 +133,11 @@ func dispatch(cmd string, args []string) bool {
 		// the single-instance mutex takes a moment), so runGUI retries
 		// acquiring it briefly instead of immediately treating
 		// ERROR_ALREADY_EXISTS as "another real instance is running."
+		// An optional argument is the relaunch mode after an automatic
+		// update (relaunchModeForUpdate, userbusy_windows.go).
+		if len(args) > 0 {
+			guiStartMode = args[0]
+		}
 		runGUI(true)
 	case "/update-splash":
 		// Run by closeForUpdate from a temp copy of the exe — see

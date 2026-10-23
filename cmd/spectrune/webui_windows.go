@@ -326,11 +326,20 @@ func runGUI(retryMutex bool) {
 	go cleanupUpdateSplash()
 
 	hwnd := uintptr(w.Window())
-	revealMainWindowOnce = sync.OnceFunc(func() { revealMainWindow(hwnd) })
+	revealMainWindowOnce = sync.OnceFunc(func() { revealMainWindow(hwnd, guiStartMode) })
+	if guiStartMode == relaunchTray {
+		// Reopened by an update while it was hidden in the tray: stay
+		// there, already centered for whenever the tray opens it.
+		revealMainWindowOnce()
+		mainWindowVisible = false // so the tray's first show is reported
+		w.Init("window.__startHidden = true;")
+	}
 	// Fallback in case the page never calls uiReady.
 	time.AfterFunc(6*time.Second, func() { w.Dispatch(revealMainWindowOnce) })
 	setWindowIconFromResource(hwnd)
-	forceForeground(hwnd)
+	if guiStartMode == relaunchNormal {
+		forceForeground(hwnd)
+	}
 	// A second, delayed reassertion — confirmed live 2026-09-23 that the
 	// immediate call above can win the race and then silently lose
 	// foreground again moments later: a Tab sent right after launch
@@ -344,10 +353,12 @@ func runGUI(retryMutex bool) {
 	// reparented once content is ready) appears to reset activation.
 	// Firing forceForeground again once that's had time to settle wins
 	// back whatever it took.
-	go func() {
-		time.Sleep(800 * time.Millisecond)
-		w.Dispatch(func() { forceForeground(hwnd) })
-	}()
+	if guiStartMode == relaunchNormal {
+		go func() {
+			time.Sleep(800 * time.Millisecond)
+			w.Dispatch(func() { forceForeground(hwnd) })
+		}()
+	}
 	if err := w.Bind("setTitleBarColor", func(hex string) error {
 		return setTitleBarColor(hwnd, hex)
 	}); err != nil {
@@ -770,7 +781,7 @@ func bindAPI(w webview2.WebView) {
 	// back to checking in this window.
 	must(w.Bind("startUpdateCheck", func() {
 		go func() {
-			if err := launchUpdateSplash(splashModeCheck, currentHwnd); err != nil {
+			if err := launchUpdateSplash(splashModeCheck, currentHwnd, relaunchNormal); err != nil {
 				log.Printf("startUpdateCheck: %v", err)
 				w.Dispatch(func() { w.Eval("backgroundUpdateHandled = false; checkUpdateInWindow();") })
 				return
@@ -787,6 +798,18 @@ func bindAPI(w webview2.WebView) {
 		signalGUIReady()
 	}))
 
+	// isUserBusy and deferUpdate hold an automatic update back while a
+	// game or another full-screen app is running (userbusy_windows.go).
+	must(w.Bind("isUserBusy", userBusy))
+	must(w.Bind("deferUpdate", func() error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.DeferInstall", struct{}{}, &struct{}{})
+	}))
+
 	must(w.Bind("closeForUpdate", func(delayMs int, alreadyDone bool) error {
 		exePath, err := os.Executable()
 		if err != nil {
@@ -794,6 +817,11 @@ func bindAPI(w webview2.WebView) {
 		}
 		var createArgs []string
 		splashShown := false
+		relaunch := relaunchModeForUpdate()
+		restartArg := "/gui-restart"
+		if relaunch != relaunchNormal {
+			restartArg += " " + relaunch
+		}
 		if alreadyDone {
 			// Nothing left to wait for — just enough slack for this
 			// window's own DestroyWindow to release the single-instance
@@ -801,7 +829,7 @@ func bindAPI(w webview2.WebView) {
 			triggerTime := time.Now().Add(2 * time.Second).Format("15:04:05")
 			createArgs = []string{
 				"/create", "/tn", "SpectruneRelaunchAfterUpdate",
-				"/tr", fmt.Sprintf(`"%s" /gui-restart`, exePath),
+				"/tr", fmt.Sprintf(`"%s" %s`, exePath, restartArg),
 				"/sc", "once", "/st", triggerTime, "/it", "/f",
 			}
 		} else {
@@ -858,7 +886,7 @@ func bindAPI(w webview2.WebView) {
 			// relaunch as the VBScript watcher below but keeps a progress
 			// bar on screen the whole time. The watcher stays as the
 			// fallback if it can't be started.
-			if splashErr := launchUpdateSplash(splashModeInstall, currentHwnd); splashErr == nil {
+			if splashErr := launchUpdateSplash(splashModeInstall, currentHwnd, relaunch); splashErr == nil {
 				splashShown = true
 			} else {
 				log.Printf("closeForUpdate: update window unavailable, using the invisible watcher: %v", splashErr)
@@ -904,8 +932,8 @@ func bindAPI(w webview2.WebView) {
 					"        Exit For\r\n"+
 					"    End If\r\n"+
 					"Next\r\n"+
-					"WshShell.Run Chr(34) & exePath & Chr(34) & \" /gui-restart\", 0, False\r\n",
-				exePath,
+					"WshShell.Run Chr(34) & exePath & Chr(34) & \" %s\", 0, False\r\n",
+				exePath, restartArg,
 			)
 			// wscript.exe path is guaranteed space-free (ProgramData\Spectrune).
 			scriptPath := filepath.Join(stateDir, "relaunch-wait.vbs")
