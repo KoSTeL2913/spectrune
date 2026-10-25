@@ -573,10 +573,7 @@ func updateSplashHTML(info updateSplashInfo) string {
     user-select: none; cursor: default;
   }
   .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 15px; }
-  .logo {
-    width: 22px; height: 22px; border-radius: 6px; background: %s;
-    color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center;
-  }
+  .logo { width: 22px; height: 22px; border-radius: 6px; }
   #status { margin-top: 12px; color: %s; line-height: 1.4; min-height: 19px; }
   .track { margin-top: 12px; height: 4px; border-radius: 2px; overflow: hidden; background: %s; }
   .fill {
@@ -587,7 +584,7 @@ func updateSplashHTML(info updateSplashInfo) string {
   @keyframes run { 0%% { transform: translateX(-100%%); } 100%% { transform: translateX(250%%); } }
 </style></head>
 <body>
-  <div class="brand"><div class="logo">S</div>Spectrune</div>
+  <div class="brand"><img class="logo" src="%s" alt="">Spectrune</div>
   <div id="status">%s</div>
   <div class="track"><div class="fill"></div></div>
 <script>
@@ -597,5 +594,5 @@ func updateSplashHTML(info updateSplashInfo) string {
   window.addEventListener('load', function() { setTimeout(splashReady, 50); });
 </script>
 </body></html>`,
-		scheme, base, ink, border, splashRadius, info.Grad, muted, track, info.Grad, html.EscapeString(first))
+		scheme, base, ink, border, splashRadius, muted, track, info.Grad, appTileURI, html.EscapeString(first))
 }
