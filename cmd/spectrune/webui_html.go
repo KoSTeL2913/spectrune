@@ -2476,13 +2476,15 @@ var THEMES = {
 // dust and the starfield redraw together and the page is re-composited
 // once per tick rather than once for each. Each handler returns whether
 // it still wants ticks; with none left the timer stops entirely (nothing
-// moving, nothing hidden still running at 60 Hz).
+// moving, nothing hidden still running at 60 Hz). Handlers also get the
+// tick's number, so ones that skip ticks can skip the same ones.
 var ANIM_SLOT_MS = 42;
 var animTicker = (function() {
-  var handlers = [], timer = null;
+  var handlers = [], timer = null, n = 0;
   function tick() {
     var now = performance.now(), any = false;
-    handlers.forEach(function(f) { if (f(now)) any = true; });
+    n++;
+    handlers.forEach(function(f) { if (f(now, n)) any = true; });
     if (!any) { clearInterval(timer); timer = null; }
   }
   return {
@@ -2528,13 +2530,11 @@ var orbDust = (function() {
   // nothing is happening; every tick while connecting or bursting, when the
   // dust moves fast enough to need it. Frames are what cost (each one
   // recomposites the window), so halving them roughly halves the load.
-  var tickN = 0;
-  animTicker.add(function() {
+  animTicker.add(function(now, n) {
     if (mode !== 'run') return false;
-    tickN++;
     var fast = burst > .01 || $('hero').classList.contains('connecting');
     if (fast) step(false, 1);
-    else if (tickN % 2 === 0) step(false, 2);
+    else if (n % 2 === 0) step(false, 2);
     return true;
   });
   // drawStill paints the dust unmoving, in the current state's colors —
@@ -2656,9 +2656,9 @@ function applyBackgroundImage() {
 // Three depths of stars drifting slowly left (a little faster while a
 // tunnel is up), a few twinkling, plus an occasional shooting star.
 // Cheap by design: each depth is drawn once into its own off-screen
-// canvas and then only blitted at an offset, so a frame is three image
-// copies plus a few dozen dots — at ~6 fps, and none at all while the
-// window is hidden (see setAnimationsPaused).
+// canvas and then only blitted at a sub-pixel offset, so a frame is three
+// image copies plus a few dozen dots — at ~12 fps, and none at all while
+// the window is hidden (see setAnimationsPaused).
 var starfield = (function() {
   var canvas = $('space');
   var ctx = canvas.getContext('2d');
@@ -2666,7 +2666,7 @@ var starfield = (function() {
   var layers = [];   // [{img, speed, off}]
   var twinklers = []; // a few stars drawn live, so they can twinkle
   var shooting = null, nextShot = 0;
-  var enabled = false, mode = 'run', last = 0, tickN = 0, speed = 1;
+  var enabled = false, mode = 'run', last = 0, speed = 1;
   var warpV = 0; // >0 right after a connect: stars streak out from the centre
   var accent = '#8b3dff';
   var bright = false; // over a background photo: bigger stars with a halo
@@ -2713,13 +2713,16 @@ var starfield = (function() {
         tw: Math.random() * Math.PI * 2, tws: .8 + Math.random() * 2, c: starColor() });
     }
   }
-  // Every fourth animTicker tick (~6 fps, on a frame the dust draws anyway)
-  // for the slow drift — a few px/s doesn't need more; every tick
-  // while a warp or shooting star is moving fast.
-  animTicker.add(function(now) {
+  // On the same ticks as the idle dust (~12 fps): every frame
+  // recomposites the whole window, on the CPU and the GPU alike, so the
+  // stars ride frames the dust makes anyway instead of adding their own.
+  // At a few px/s that is about a pixel a frame, which the un-rounded,
+  // sub-pixel blit shows as a smooth drift (6 fps and whole pixels were
+  // visibly jerky). Every tick while a warp or shooting star is moving
+  // fast.
+  animTicker.add(function(now, n) {
     if (!enabled || mode !== 'run') return false;
-    tickN++;
-    if (!(warpV > .02 || shooting) && tickN % 4) return true;
+    if (!(warpV > .02 || shooting) && n % 2) return true;
     var dt = last ? Math.min(now - last, 250) : 0;
     last = now;
     paint(dt, false, now);
@@ -2744,7 +2747,7 @@ var starfield = (function() {
     ctx.globalAlpha = 1;
     layers.forEach(function(L) {
       if (!reduced) L.off = (L.off + L.v * speed * dt / 1000 * dpr) % canvas.width;
-      var x = -Math.round(L.off);
+      var x = -L.off;
       ctx.drawImage(L.img, x, 0);
       ctx.drawImage(L.img, x + canvas.width, 0);
     });
