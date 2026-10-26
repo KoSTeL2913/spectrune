@@ -15,6 +15,9 @@
 //   - ip rule add fwmark <fwMark> table <routeTable>
 //   - ip route add default dev spectrune0 table <routeTable>
 //
+// A profile with no apps selected is a full tunnel, as on Windows (the
+// GUI labels it "All traffic"): see applyFullTunnel.
+//
 // Moving a PID into the cgroup (echo pid > cgroup.procs) immediately
 // starts marking *that process's future packets* — including a process
 // that was already running and already had other connections open
@@ -55,6 +58,12 @@ const (
 	fwMark       = "0xca11"    // arbitrary; confirmed live 2026-09 that the real AmneziaWG kernel client already uses 0xca6c on this machine, so pick something else
 	routeTable   = "100"
 
+	// bypassMark goes on the tunnel's own UDP socket so that in
+	// full-tunnel mode the encrypted packets skip table 100 instead of
+	// looping back into spectrune0 — the same trick wg-quick uses.
+	bypassMark   = 0xca12
+	fullRulePrio = "31000" // suppress rule; the catch-all rule takes fullRulePrio+1
+
 	matchInterval = time.Second
 )
 
@@ -69,6 +78,8 @@ type LinuxBridge struct {
 	includedApps []string // binary basenames/paths resolved from the profile's IncludedApps desktop IDs
 	stopMatch    chan struct{}
 	since        time.Time // when Start brought the tunnel up, for the GUI's connection timer
+	dns          []string  // the profile's DNS, applied in full-tunnel mode
+	full         bool      // full-tunnel rules currently applied
 }
 
 func runCmd(name string, args ...string) error {
@@ -93,6 +104,7 @@ func teardownRouting() {
 	runCmdIgnoreErr("iptables", "-t", "mangle", "-D", "OUTPUT", "-m", "set", "--match-set", domainSetName, "dst", "-j", "MARK", "--set-mark", fwMark)
 	runCmdIgnoreErr("iptables", "-t", "nat", "-D", "POSTROUTING", "-o", tunName, "-j", "MASQUERADE")
 	runCmdIgnoreErr("ip", "rule", "del", "fwmark", fwMark, "table", routeTable)
+	removeFullTunnel()
 	runCmdIgnoreErr("ip", "route", "flush", "table", routeTable)
 	runCmdIgnoreErr("ip", "link", "del", tunName)
 	runCmdIgnoreErr("ipset", "destroy", domainSetName)
@@ -142,6 +154,10 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	if err := dev.IpcSet(uapiConf); err != nil {
 		dev.Close()
 		return fmt.Errorf("IpcSet: %w", err)
+	}
+	if err := dev.BindSetMark(bypassMark); err != nil {
+		dev.Close()
+		return fmt.Errorf("BindSetMark: %w", err)
 	}
 	if err := dev.Up(); err != nil {
 		dev.Close()
@@ -202,6 +218,7 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	}
 
 	b.mu.Lock()
+	b.dns = cfg.DNS
 	b.includedApps = resolveAppBinaries(cfg.IncludedApps)
 	b.stopMatch = make(chan struct{})
 	stopCh := b.stopMatch
@@ -215,6 +232,8 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	} else {
 		b.sniffer = sniffer
 	}
+
+	b.syncFullTunnel(len(cfg.IncludedApps) == 0)
 
 	b.since = time.Now()
 	log.Printf("Spectrune routing up (cgroup %s, fwmark %s), tunnel to %s", cgroupRoot, fwMark, cfg.Endpoint)
@@ -249,6 +268,102 @@ func (b *LinuxBridge) UpdateIncludedApps(apps []string) {
 	b.mu.Lock()
 	b.includedApps = resolveAppBinaries(apps)
 	b.mu.Unlock()
+	b.syncFullTunnel(len(apps) == 0)
+}
+
+// syncFullTunnel applies or removes the full-tunnel rules to match the
+// profile's app selection — emptying the Apps list while connected turns
+// a split profile into a full one and back, like Windows'
+// syncFullTunnelExtras.
+func (b *LinuxBridge) syncFullTunnel(full bool) {
+	b.mu.Lock()
+	applied, dns := b.full, b.dns
+	b.full = full
+	b.mu.Unlock()
+	switch {
+	case full && !applied:
+		if err := applyFullTunnel(dns); err != nil {
+			log.Printf("full-tunnel mode: %v", err)
+		}
+	case !full && applied:
+		removeFullTunnel()
+	}
+}
+
+// applyFullTunnel routes everything except the tunnel's own UDP socket
+// (bypassMark) through table 100, wg-quick style:
+//   - "table main suppress_prefixlength 0" first, so LAN and other
+//     specific routes keep working and only the default route is replaced;
+//   - "not fwmark bypassMark table 100" for the rest.
+//
+// The split-mode cgroup/ipset rules stay in place; they're simply
+// covered by the catch-all.
+//
+// IPv6 gets the same rules with an unreachable default — the tunnel is
+// IPv4-only (first Address= only), and without it an IPv6-capable network
+// would carry v6 traffic straight past the VPN (the leak Windows blocks
+// with its IPv6 firewall rule). Unreachable makes browsers fall back to
+// IPv4 at once instead of timing out.
+//
+// DNS: systemd-resolved is pointed at the profile's DNS (1.1.1.1 if it
+// has none, as on Windows) through spectrune0 with the "~." routing
+// domain, so lookups go through the tunnel instead of the LAN router.
+// Best-effort: no resolved, no DNS change, but traffic is still tunneled.
+// The settings vanish together with the link on teardown.
+func applyFullTunnel(dns []string) error {
+	bypassMarkHex := fmt.Sprintf("%#x", bypassMark)
+	// Replies to the tunnel's marked socket must pass rp_filter's check
+	// against the mark-aware route lookup — same as wg-quick.
+	runCmdIgnoreErr("sysctl", "-q", "-w", "net.ipv4.conf.all.src_valid_mark=1")
+	catchAllPrio := nextPrio(fullRulePrio)
+	steps := [][]string{
+		{"ip", "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", fullRulePrio},
+		{"ip", "rule", "add", "not", "fwmark", bypassMarkHex, "table", routeTable, "priority", catchAllPrio},
+	}
+	for _, s := range steps {
+		if err := runCmd(s[0], s[1:]...); err != nil {
+			removeFullTunnel()
+			return err
+		}
+	}
+	runCmdIgnoreErr("ip", "-6", "route", "add", "unreachable", "default", "table", routeTable)
+	runCmdIgnoreErr("ip", "-6", "rule", "add", "table", "main", "suppress_prefixlength", "0", "priority", fullRulePrio)
+	runCmdIgnoreErr("ip", "-6", "rule", "add", "not", "fwmark", bypassMarkHex, "table", routeTable, "priority", catchAllPrio)
+
+	if len(dns) == 0 {
+		dns = []string{"1.1.1.1"}
+	}
+	if _, err := exec.LookPath("resolvectl"); err == nil {
+		runCmdIgnoreErr("resolvectl", append([]string{"dns", tunName}, dns...)...)
+		runCmdIgnoreErr("resolvectl", "domain", tunName, "~.")
+		runCmdIgnoreErr("resolvectl", "default-route", tunName, "true")
+	}
+	log.Printf("full-tunnel mode: all traffic goes through %s (DNS %s)", tunName, strings.Join(dns, ", "))
+	return nil
+}
+
+// removeFullTunnel undoes applyFullTunnel — best-effort and idempotent
+// (called from teardownRouting too). The DNS settings would go with the
+// link anyway, but a switch to split mode keeps the link, so revert them.
+func removeFullTunnel() {
+	catchAllPrio := nextPrio(fullRulePrio)
+	for _, fam := range []string{"-4", "-6"} {
+		runCmdQuiet("ip", fam, "rule", "del", "priority", fullRulePrio)
+		runCmdQuiet("ip", fam, "rule", "del", "priority", catchAllPrio)
+	}
+	runCmdQuiet("ip", "-6", "route", "flush", "table", routeTable)
+	runCmdQuiet("resolvectl", "revert", tunName)
+}
+
+func nextPrio(p string) string {
+	n, _ := strconv.Atoi(p)
+	return strconv.Itoa(n + 1)
+}
+
+// runCmdQuiet is runCmdIgnoreErr without the log line, for cleanup that
+// usually has nothing to remove (split mode, a fresh Start).
+func runCmdQuiet(name string, args ...string) {
+	exec.Command(name, args...).Run()
 }
 
 // UpdateIncludedDomainLists swaps which domain lists are enabled without
