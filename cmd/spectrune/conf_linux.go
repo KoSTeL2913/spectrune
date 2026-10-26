@@ -29,9 +29,10 @@ type LinuxConfig struct {
 	PrivateKey string // base64, as read from the file
 	Address    string // "10.x.x.x/24" — first Address= line only
 	DNS        []string
-	// AmneziaExtra holds jc/jmin/jmax/s1/s2/h1-h4 verbatim (lower-cased
-	// keys, raw values) — passed straight through into the UAPI config
-	// text unmodified, same as tunnel.go's cfg.ToUAPI() does on Windows.
+	// AmneziaExtra holds the AmneziaWG obfuscation keys (see amneziaParams)
+	// as "key=value" with the key lower-cased as in the file and the value
+	// raw — ToUAPI and ToWgQuick translate per key, mirroring the Windows
+	// conf package's ToUAPI/ToWgQuick.
 	AmneziaExtra []string
 
 	PeerPublicKey    string // base64
@@ -65,12 +66,65 @@ func b64ToHex(b64 string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
+// amneziaParam describes one AmneziaWG [Interface] key: how it is spelled
+// when written back to the file, its UAPI name (empty = the engine has no
+// such key, so it is only kept in the file) and how its value converts.
+type amneziaParam struct {
+	fileName string
+	uapiName string
+	conv     func(string) (string, error)
+}
+
+// amneziaParams covers AWG 1.0 (Jc..H4), 2.0 (S3/S4, H ranges, I1-I5) and
+// 3.x (HeaderProtectionKey and the timing/padding keys) — the same set the
+// Windows conf package parses. J1-J3/Itime are AWG 1.5 leftovers the
+// amneziawg-go v3 engine no longer accepts; Windows drops them too.
+var amneziaParams = map[string]amneziaParam{
+	"jc":                     {"Jc", "jc", nil},
+	"jmin":                   {"Jmin", "jmin", nil},
+	"jmax":                   {"Jmax", "jmax", nil},
+	"s1":                     {"S1", "s1", nil},
+	"s2":                     {"S2", "s2", nil},
+	"s3":                     {"S3", "s3", nil},
+	"s4":                     {"S4", "s4", nil},
+	"h1":                     {"H1", "h1", nil},
+	"h2":                     {"H2", "h2", nil},
+	"h3":                     {"H3", "h3", nil},
+	"h4":                     {"H4", "h4", nil},
+	"i1":                     {"I1", "i1", nil},
+	"i2":                     {"I2", "i2", nil},
+	"i3":                     {"I3", "i3", nil},
+	"i4":                     {"I4", "i4", nil},
+	"i5":                     {"I5", "i5", nil},
+	"j1":                     {"J1", "", nil},
+	"j2":                     {"J2", "", nil},
+	"j3":                     {"J3", "", nil},
+	"itime":                  {"Itime", "", nil},
+	"headerprotectionkey":    {"HeaderProtectionKey", "header_protection_key", b64ToHex},
+	"contentpaddingaddition": {"ContentPaddingAddition", "content_padding_addition", nil},
+	"rekeyaftertime":         {"RekeyAfterTime", "rekey_after_time", nil},
+	"rekeytimeout":           {"RekeyTimeout", "rekey_timeout", nil},
+	"rejectaftertime":        {"RejectAfterTime", "reject_after_time", nil},
+	"keepalivetimeout":       {"KeepaliveTimeout", "keepalive_timeout", nil},
+	"maxhandshakeattempts":   {"MaxHandshakeAttempts", "max_handshake_attempts", nil},
+	"randomtrailers":         {"RandomTrailers", "random_trailers", boolToUAPI},
+	"disablecookies":         {"DisableCookies", "disable_cookies", boolToUAPI},
+}
+
 func isAmneziaParam(key string) bool {
-	switch key {
-	case "jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4":
-		return true
+	_, ok := amneziaParams[key]
+	return ok
+}
+
+// boolToUAPI turns awg-quick's on/off/true/... into the engine's 1/0.
+func boolToUAPI(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "on", "1", "true", "t", "yes":
+		return "1", nil
+	case "off", "0", "false", "f", "no":
+		return "0", nil
 	}
-	return false
+	return "", fmt.Errorf("not a boolean: %q", v)
 }
 
 // ParseWgQuick reads a wg-quick-style [Interface]/[Peer] config (the same
@@ -115,7 +169,11 @@ func ParseWgQuick(text, name string) (*LinuxConfig, error) {
 				}
 			}
 		case section == "interface" && isAmneziaParam(key):
-			cfg.AmneziaExtra = append(cfg.AmneziaExtra, key+"="+val)
+			// Empty I1-I5 / AWG 3 keys mean "unset" in configs the
+			// Amnezia apps export — skip rather than send key= to the engine.
+			if val != "" {
+				cfg.AmneziaExtra = append(cfg.AmneziaExtra, key+"="+val)
+			}
 		case section == "interface" && key == "includedapps":
 			for _, a := range strings.Split(val, ",") {
 				if a = strings.TrimSpace(a); a != "" {
@@ -171,7 +229,17 @@ func (c *LinuxConfig) ToUAPI() (string, error) {
 	fmt.Fprintf(&b, "private_key=%s\n", privHex)
 	fmt.Fprintf(&b, "listen_port=0\n")
 	for _, e := range c.AmneziaExtra {
-		fmt.Fprintf(&b, "%s\n", e)
+		key, val, _ := strings.Cut(e, "=")
+		p, ok := amneziaParams[key]
+		if !ok || p.uapiName == "" {
+			continue
+		}
+		if p.conv != nil {
+			if val, err = p.conv(val); err != nil {
+				return "", fmt.Errorf("%s: %w", p.fileName, err)
+			}
+		}
+		fmt.Fprintf(&b, "%s=%s\n", p.uapiName, val)
 	}
 	fmt.Fprintf(&b, "public_key=%s\n", pubHex)
 	if c.PeerPresharedKey != "" {
@@ -243,9 +311,9 @@ func (c *LinuxConfig) ToWgQuick() string {
 		fmt.Fprintf(&b, "DNS = %s\n", strings.Join(c.DNS, ", "))
 	}
 	for _, e := range c.AmneziaExtra {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			fmt.Fprintf(&b, "%s = %s\n", strings.ToUpper(parts[0][:1])+parts[0][1:], parts[1])
+		key, val, ok := strings.Cut(e, "=")
+		if p, known := amneziaParams[key]; ok && known {
+			fmt.Fprintf(&b, "%s = %s\n", p.fileName, val)
 		}
 	}
 	if len(c.IncludedDomainLists) > 0 {
