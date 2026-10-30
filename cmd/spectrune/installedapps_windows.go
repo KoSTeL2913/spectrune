@@ -151,6 +151,23 @@ func enumerateInstalledApps() []installedApp {
 		add(sysApp.name, filepath.Join(sysRoot, "System32", sysApp.exe))
 	}
 
+	// Codex's npm CLI and app-server daemon have no Uninstall registry
+	// entries. Discover them in the GUI user's profile, never a fixed user.
+	if profile, err := os.UserHomeDir(); err == nil {
+		patterns := []string{
+			filepath.Join(profile, ".codex", "packages", "app-server-daemon", "releases", "*", "bin", "codex.exe"),
+		}
+		if roaming := os.Getenv("APPDATA"); roaming != "" {
+			patterns = append(patterns, filepath.Join(roaming, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-*", "vendor", "*", "bin", "codex.exe"))
+		}
+		for _, pattern := range patterns {
+			paths, _ := filepath.Glob(pattern)
+			for _, path := range paths {
+				add("Codex (CLI + app-server)", path)
+			}
+		}
+	}
+
 	appPathsRoots := []struct {
 		root registry.Key
 		path string

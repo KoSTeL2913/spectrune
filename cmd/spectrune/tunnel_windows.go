@@ -191,6 +191,9 @@ func buildIncludedApps(apps []string) map[string]bool {
 	for _, p := range apps {
 		clean := strings.ToLower(filepath.Clean(p))
 		included[clean] = true
+		if key := codexAppKey(clean); key != "" {
+			included[key] = true
+		}
 		if norm := normalizeVersionedPath(clean); norm != "" {
 			included[norm] = true
 		}
@@ -216,7 +219,7 @@ func (t *outboundTunnel) matches(exePath string) bool {
 		return false
 	}
 	clean := strings.ToLower(filepath.Clean(exePath))
-	if t.includedApps[clean] {
+	if t.includedApps[clean] || (codexAppKey(clean) != "" && t.includedApps[codexAppKey(clean)]) {
 		return true
 	}
 	if norm := normalizeVersionedPath(clean); norm != "" {
@@ -241,7 +244,7 @@ func (t *outboundTunnel) sharedApp(apps []string) string {
 	defer t.mu.RUnlock()
 	for _, app := range apps {
 		clean := strings.ToLower(filepath.Clean(app))
-		if t.includedApps[clean] {
+		if t.includedApps[clean] || (codexAppKey(clean) != "" && t.includedApps[codexAppKey(clean)]) {
 			return app
 		}
 		if norm := normalizeVersionedPath(clean); norm != "" && t.includedApps[norm] {

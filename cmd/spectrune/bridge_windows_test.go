@@ -35,3 +35,21 @@ func TestShellRouting(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexRouting(t *testing.T) {
+	cli := `C:\Users\alice\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe`
+	daemon := `C:\Users\alice\.codex\packages\app-server-daemon\releases\0.166.0-x86_64-pc-windows-msvc\bin\codex.exe`
+	updated := `C:\Users\alice\.codex\packages\app-server-daemon\releases\0.200.0-x86_64-pc-windows-msvc\bin\codex.exe`
+	other := `C:\Users\bob\.codex\packages\app-server-daemon\releases\0.200.0-x86_64-pc-windows-msvc\bin\codex.exe`
+	for _, selected := range []string{cli, daemon} {
+		tunnel := &outboundTunnel{includedApps: buildIncludedApps([]string{selected})}
+		for _, path := range []string{cli, daemon, updated} {
+			if !tunnel.matches(path) || tunnel.sharedApp([]string{path}) == "" {
+				t.Errorf("selected %s does not route/claim %s", selected, path)
+			}
+		}
+		if tunnel.matches(other) || tunnel.sharedApp([]string{other}) != "" {
+			t.Error("another user's Codex must not match")
+		}
+	}
+}
