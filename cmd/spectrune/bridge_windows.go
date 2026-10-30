@@ -167,10 +167,11 @@ type Bridge struct {
 }
 
 type trackedConn struct {
-	procName string
-	dstIP    string
-	tunnel   string // carrying tunnel's profile name, "" for direct
-	closer   io.Closer
+	procName  string
+	ancestors []string
+	dstIP     string
+	tunnel    string // carrying tunnel's profile name, "" for direct
+	closer    io.Closer
 }
 
 // namedTunnel is one connected profile's outbound tunnel.
@@ -305,7 +306,7 @@ func (b *Bridge) tunnel(name string) *outboundTunnel {
 // them claim the same app, the one connected first wins. A full-tunnel
 // profile only gets what no split profile claimed, which is what makes
 // "everything via A, but Telegram via B" work.
-func (b *Bridge) pickTunnel(procName, dstIP string) *namedTunnel {
+func (b *Bridge) pickTunnel(procName, dstIP string, ancestors ...string) *namedTunnel {
 	b.tunMu.RLock()
 	defer b.tunMu.RUnlock()
 	var full *namedTunnel
@@ -318,6 +319,15 @@ func (b *Bridge) pickTunnel(procName, dstIP string) *namedTunnel {
 		}
 		if nt.t.matches(procName) || nt.t.matchesDomainIP(dstIP) {
 			return nt
+		}
+	}
+	// Explicit app/domain rules take priority over inherited app rules.
+	// Search nearest parent first, then fall back to a full tunnel.
+	for _, parent := range ancestors {
+		for _, nt := range b.tunnels {
+			if !nt.t.isFullTunnel() && nt.t.matches(parent) {
+				return nt
+			}
 		}
 	}
 	return full
@@ -713,7 +723,7 @@ func (b *Bridge) tunnelPrivateKeyInUse(key conf.Key) string {
 
 // trackConn registers a just-opened relayed connection and returns an id
 // to hand back to untrackConn once it finishes.
-func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer) uint64 {
+func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer, ancestors ...string) uint64 {
 	b.connsMu.Lock()
 	defer b.connsMu.Unlock()
 	if b.conns == nil {
@@ -721,7 +731,7 @@ func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer) uint64 {
 	}
 	b.nextConnID++
 	id := b.nextConnID
-	b.conns[id] = &trackedConn{procName: procName, dstIP: dstIP, tunnel: tunnel, closer: c}
+	b.conns[id] = &trackedConn{ancestors: ancestors, procName: procName, dstIP: dstIP, tunnel: tunnel, closer: c}
 	return id
 }
 
@@ -742,7 +752,7 @@ func (b *Bridge) closeStaleConns() {
 	var stale []io.Closer
 	for _, c := range b.conns {
 		want := ""
-		if nt := b.pickTunnel(c.procName, c.dstIP); nt != nil {
+		if nt := b.pickTunnel(c.procName, c.dstIP, c.ancestors...); nt != nil {
 			want = nt.name
 		}
 		if want != c.tunnel {
@@ -1030,16 +1040,17 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	local := gonet.NewTCPConn(&wq, endpoint)
 
+	ancestors := processAncestorPaths(pid)
 	var nt *namedTunnel
 	if int(pid) != os.Getpid() {
-		nt = b.pickTunnel(procName, id.LocalAddress.String())
+		nt = b.pickTunnel(procName, id.LocalAddress.String(), ancestors...)
 	}
 	if nt != nil {
 		log.Printf("  -> TUNNEL %q (matched %s)", nt.name, procName)
-		go b.relayViaTunnel(nt, local, id.LocalAddress.String(), id.LocalPort, procName)
+		go b.relayViaTunnel(nt, local, id.LocalAddress.String(), id.LocalPort, procName, ancestors...)
 	} else {
 		log.Printf("  -> direct")
-		go b.relayDirect(local, dstAddr, id.LocalPort, procName)
+		go b.relayDirect(local, dstAddr, id.LocalPort, procName, ancestors...)
 	}
 }
 
@@ -1082,9 +1093,10 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 		onResponse = b.observeDNSResponse
 	}
 
+	ancestors := processAncestorPaths(pid)
 	var nt *namedTunnel
 	if int(pid) != os.Getpid() {
-		nt = b.pickTunnel(procName, id.LocalAddress.String())
+		nt = b.pickTunnel(procName, id.LocalAddress.String(), ancestors...)
 	}
 	if nt != nil {
 		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL %q", appAddr, dstAddr, pid, procName, nt.name)
@@ -1094,12 +1106,12 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 				return nil, err
 			}
 			return nt.t.dialUDP(netip.AddrPortFrom(addr, id.LocalPort))
-		}, onResponse)
+		}, onResponse, ancestors...)
 	} else {
 		go b.relayUDP(local, procName, id.LocalAddress.String(), "", func() (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second, Control: b.bindToRealIface}
 			return d.Dial("udp4", dstAddr)
-		}, onResponse)
+		}, onResponse, ancestors...)
 	}
 }
 
@@ -1115,8 +1127,8 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 // regardless of which path carries it: an app that isn't itself included can still
 // resolve a domain that's in an enabled list, and that resolution needs
 // to be observed no matter which path carried the query.
-func (b *Bridge) relayUDP(local *gonet.UDPConn, procName, dstIP, tunnel string, dial func() (net.Conn, error), onResponse func([]byte)) {
-	connID := b.trackConn(procName, dstIP, tunnel, local)
+func (b *Bridge) relayUDP(local *gonet.UDPConn, procName, dstIP, tunnel string, dial func() (net.Conn, error), onResponse func([]byte), ancestors ...string) {
+	connID := b.trackConn(procName, dstIP, tunnel, local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	remote, err := dial()
@@ -1192,8 +1204,8 @@ func (s *dnsTCPSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP string, dstPort uint16, procName string) {
-	connID := b.trackConn(procName, dstIP, nt.name, local)
+func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP string, dstPort uint16, procName string, ancestors ...string) {
+	connID := b.trackConn(procName, dstIP, nt.name, local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	addr, err := netip.ParseAddr(dstIP)
@@ -1225,9 +1237,9 @@ func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP str
 // relayDirect dials the real destination directly, over the real physical
 // interface (bypassing our own default route via IP_UNICAST_IF), and
 // pipes bytes both ways. This is the "not included" path.
-func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint16, procName string) {
+func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint16, procName string, ancestors ...string) {
 	dstIP, _, _ := net.SplitHostPort(dstAddr)
-	connID := b.trackConn(procName, dstIP, "", local)
+	connID := b.trackConn(procName, dstIP, "", local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	log.Printf("  relayDirect: dialing %s via iface %d", dstAddr, b.realIfaceIndex)
