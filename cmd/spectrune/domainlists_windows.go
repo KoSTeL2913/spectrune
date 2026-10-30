@@ -128,7 +128,7 @@ func resolveDomainLists(listNames []string) []string {
 			continue
 		}
 		for _, d := range domains {
-			d = strings.ToLower(strings.TrimSpace(d))
+			d = normalizeDomainRule(d)
 			if d != "" && !seen[d] {
 				seen[d] = true
 				out = append(out, d)
