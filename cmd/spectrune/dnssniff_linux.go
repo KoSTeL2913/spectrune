@@ -47,7 +47,7 @@ func newDomainSniffer() *domainSniffer {
 func (d *domainSniffer) setDomains(domains []string) {
 	normalized := make([]string, 0, len(domains))
 	for _, dm := range domains {
-		dm = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(dm), "."))
+		dm = normalizeDomainRule(dm)
 		if dm != "" {
 			normalized = append(normalized, dm)
 		}
