@@ -296,7 +296,7 @@ func (t *outboundTunnel) matchesDomainIP(ip string) bool {
 // matchingDomain returns the configured domain queried matches (itself
 // or a subdomain of it), or "" if none do. Caller must hold t.mu.
 func (t *outboundTunnel) matchingDomainLocked(queried string) string {
-	queried = strings.ToLower(strings.TrimSuffix(queried, "."))
+	queried = normalizeDomainRule(queried)
 	for _, d := range t.domains {
 		if queried == d || strings.HasSuffix(queried, "."+d) {
 			return d
