@@ -1,3 +1,5 @@
+//go:build !linux
+
 package main
 
 // appVersion is shown in the bottom-right corner of the GUI (webui.go's

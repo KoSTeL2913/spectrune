@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION=$(grep -oP 'const appVersion = "\K[^"]+' cmd/spectrune/version.go)
+VERSION=$(grep -oP 'const appVersion = "\K[^"]+' cmd/spectrune/version_linux.go)
 PKGROOT="/tmp/spectrune-deb-build/spectrune_${VERSION}_amd64"
 
 echo "Building spectrune ${VERSION} for Linux..."

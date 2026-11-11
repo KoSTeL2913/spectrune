@@ -25,6 +25,12 @@ Runtime (not just build-time) needs `libwebkit2gtk-4.1-0`, `libgtk-3-0`,
 `.deb` dependencies (`linux-build/DEBIAN/control`); a tarball install
 needs them installed separately.
 
+The WebView Go dependency is kept in `third_party/webview_go` with a
+runtime library loader fix (see its `SPECTRUNE.md`). It loads WebKit by
+its runtime SONAME, `libwebkit2gtk-4.1.so.0`, so end-user installations
+do not need development packages or manually created `.so` symlinks.
+The `go.mod` replacement applies to both direct builds and `.deb` builds.
+
 ## Running
 
 Needs root for the daemon (creates the routing cgroup, TUN device, and

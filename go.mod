@@ -27,3 +27,6 @@ require (
 )
 
 replace github.com/amnezia-vpn/amneziawg-windows/v3 => /home/kostel/aspt-bridge-amneziawg-windows-src
+
+// Carry the WebKit runtime SONAME fix; see third_party/webview_go/SPECTRUNE.md.
+replace github.com/webview/webview_go => ./third_party/webview_go
