@@ -1,0 +1,2 @@
+# Preserve upstream vendored files byte-for-byte, including generated CRLF headers.
+webview_go/** -whitespace
