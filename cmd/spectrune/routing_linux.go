@@ -15,7 +15,7 @@
 //   - ip rule add fwmark <fwMark> table <routeTable>
 //   - ip route add default dev spectrune0 table <routeTable>
 //
-// A profile with no apps selected is a full tunnel, as on Windows (the
+// A profile with neither apps nor domain lists selected is a full tunnel (the
 // GUI labels it "All traffic"): see applyFullTunnel.
 //
 // Moving a PID into the cgroup (echo pid > cgroup.procs) immediately
@@ -233,7 +233,7 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 		b.sniffer = sniffer
 	}
 
-	b.syncFullTunnel(len(cfg.IncludedApps) == 0)
+	b.syncFullTunnel(fullTunnelForSelection(len(cfg.IncludedApps), len(cfg.IncludedDomainLists)))
 
 	b.since = time.Now()
 	log.Printf("Spectrune routing up (cgroup %s, fwmark %s), tunnel to %s", cgroupRoot, fwMark, cfg.Endpoint)
@@ -261,19 +261,18 @@ func (b *LinuxBridge) Stop() {
 	teardownRouting()
 }
 
-// UpdateIncludedApps swaps the live app selection without a reconnect —
-// same reasoning as bridge_windows.go's UpdateIncludedApps: editing the
-// Apps list while connected shouldn't require tearing down the tunnel.
-func (b *LinuxBridge) UpdateIncludedApps(apps []string) {
+// UpdateSelection applies both selectors together so switching to domain-only
+// routing never briefly enables the full-tunnel catch-all.
+func (b *LinuxBridge) UpdateSelection(apps, domainLists []string) {
 	b.mu.Lock()
 	b.includedApps = resolveAppBinaries(apps)
 	b.mu.Unlock()
-	b.syncFullTunnel(len(apps) == 0)
+	b.UpdateIncludedDomainLists(domainLists)
+	b.syncFullTunnel(fullTunnelForSelection(len(apps), len(domainLists)))
 }
 
 // syncFullTunnel applies or removes the full-tunnel rules to match the
-// profile's app selection — emptying the Apps list while connected turns
-// a split profile into a full one and back, like Windows'
+// profile's app and domain-list selection, like Windows'
 // syncFullTunnelExtras.
 func (b *LinuxBridge) syncFullTunnel(full bool) {
 	b.mu.Lock()

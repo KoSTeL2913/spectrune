@@ -645,13 +645,12 @@ func (b *Bridge) failStart(err error) error {
 // any already-open connection whose path no longer matches the new
 // selection (see the conns field doc) so apps pick up the change without
 // needing a full restart.
-func (b *Bridge) UpdateTunnel(name string, apps, domains []string) {
+func (b *Bridge) UpdateTunnel(name string, apps, domains []string, domainListCount int) {
 	t := b.tunnel(name)
 	if t == nil {
 		return
 	}
-	t.updateIncludedApps(apps)
-	t.updateDomains(domains)
+	t.updateSelection(apps, domains, domainListCount)
 	b.syncFullTunnelExtras()
 	b.closeStaleConns()
 }

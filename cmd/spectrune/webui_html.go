@@ -900,7 +900,7 @@ var I18N = {
   en: {
     add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
     connectedShort: 'Connected', connectingShort: 'Connecting…', errorShort: 'Error',
-    routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d',
+    routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d', routingDomainListsCount: 'Domain lists: %d',
     connect: 'Connect', disconnect: 'Disconnect',
     confirmDelete: 'Delete profile "%s"?',
     back: 'Back', addProfile: 'Add profile', editProfile: 'Edit profile',
@@ -966,7 +966,7 @@ var I18N = {
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
     connectedShort: 'Подключено', connectingShort: 'Подключение…', errorShort: 'Ошибка',
-    routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d',
+    routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d', routingDomainListsCount: 'Списков доменов: %d',
     connect: 'Подключить', disconnect: 'Отключить',
     confirmDelete: 'Удалить профиль «%s»?',
     back: 'Назад', addProfile: 'Новый профиль', editProfile: 'Изменение профиля',
@@ -1563,14 +1563,17 @@ function importDroppedConfFile(file) {
 // routing-mode subtitle ("All traffic" vs "Apps: N") — shares
 // includedPreviewCache (declared below) with the existing under-the-
 // Connect-button preview rather than fetching separately.
-function routingSummaryText(apps) {
-  if (!apps || apps.length === 0) return t('routingFullTunnel');
-  return tf('routingAppsCount', apps.length);
+function routingSummaryText(apps, domainLists) {
+  var parts = [];
+  if (apps && apps.length) parts.push(tf('routingAppsCount', apps.length));
+  if (domainLists && domainLists.length) parts.push(tf('routingDomainListsCount', domainLists.length));
+  return parts.length ? parts.join(' · ') : t('routingFullTunnel');
 }
 
 // fillRoutingSummary renders a card's routing line: "All traffic", or the
 // first few routed apps' icons plus the count.
-function fillRoutingSummary(el, apps) {
+function fillRoutingSummary(el, selection) {
+  var apps = selection.apps;
   el.innerHTML = '';
   if (apps.length > 0) {
     var icons = document.createElement('span');
@@ -1583,7 +1586,7 @@ function fillRoutingSummary(el, apps) {
     });
     el.appendChild(icons);
   }
-  el.appendChild(document.createTextNode(routingSummaryText(apps)));
+  el.appendChild(document.createTextNode(routingSummaryText(apps, selection.domainLists)));
 }
 
 function loadRoutingSummaryInto(name, el) {
@@ -1593,15 +1596,15 @@ function loadRoutingSummaryInto(name, el) {
     return;
   }
   loadProfile(name).then(function(details) {
-    var apps = details.IncludedApps || [];
-    includedPreviewCache[name] = apps;
-    if (el.isConnected) fillRoutingSummary(el, apps);
+    var selection = {apps: details.IncludedApps || [], domainLists: details.IncludedDomainLists || []};
+    includedPreviewCache[name] = selection;
+    if (el.isConnected) fillRoutingSummary(el, selection);
   }).catch(function() { /* leave blank — not worth an error popup for a subtitle */ });
 }
 
 // ---------- included-apps preview (under Connect/Disconnect) ----------
 
-var includedPreviewCache = {}; // profile name -> IncludedApps array, cleared whenever that profile is saved
+var includedPreviewCache = {}; // profile name -> {apps, domainLists}, cleared whenever that profile is saved
 var includedPreviewLoading = {}; // profile name -> true while its loadProfile is in flight
 
 // includedAppsPreviewRenderedFor is the signature (see
@@ -1624,7 +1627,7 @@ function refreshIncludedAppsPreview() {
     if (includedPreviewCache[n] !== undefined || includedPreviewLoading[n]) return;
     includedPreviewLoading[n] = true;
     loadProfile(n).then(function(details) {
-      includedPreviewCache[n] = details.IncludedApps || [];
+      includedPreviewCache[n] = {apps: details.IncludedApps || [], domainLists: details.IncludedDomainLists || []};
       refreshIncludedAppsPreview();
     }).catch(function() { /* retried on the next poll tick */ })
       .finally(function() { delete includedPreviewLoading[n]; });
@@ -1655,11 +1658,12 @@ function refreshIncludedAppsPreview() {
 
 // includedAppsIcons builds a row of app icons, or the "all traffic" note
 // for a profile with no app selection.
-function includedAppsIcons(apps) {
+function includedAppsIcons(selection) {
+  var apps = selection.apps;
   if (apps.length === 0) {
     var note = document.createElement('div');
     note.className = 'included-apps-fulltunnel';
-    note.textContent = t('routingFullTunnel');
+    note.textContent = routingSummaryText(apps, selection.domainLists);
     return note;
   }
   var icons = document.createElement('div');

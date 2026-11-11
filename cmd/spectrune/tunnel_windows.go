@@ -42,8 +42,9 @@ type outboundTunnel struct {
 	// used to tear down and rebuild the whole adapter/tunnel just to
 	// change which apps route through it, dropping every other
 	// connection along with it.
-	mu           sync.RWMutex
-	includedApps map[string]bool // lower-cased absolute exe paths
+	mu              sync.RWMutex
+	includedApps    map[string]bool // lower-cased absolute exe paths
+	domainListCount int             // selected lists, including empty or unavailable lists
 
 	// domains/domainIPs back domain-list routing — the Windows analog of
 	// routing_linux.go+dnssniff_linux.go's ipset/iptables mangle
@@ -141,13 +142,14 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 	}
 
 	return &outboundTunnel{
-		dev:          dev,
-		net:          tnet,
-		privateKey:   cfg.Interface.PrivateKey,
-		dns:          dns,
-		includedApps: included,
-		domains:      resolvedDomains,
-		domainIPs:    make(map[string]bool),
+		dev:             dev,
+		net:             tnet,
+		privateKey:      cfg.Interface.PrivateKey,
+		dns:             dns,
+		includedApps:    included,
+		domainListCount: len(cfg.Interface.IncludedDomainLists),
+		domains:         resolvedDomains,
+		domainIPs:       make(map[string]bool),
 	}, nil
 }
 
@@ -202,10 +204,8 @@ func buildIncludedApps(apps []string) map[string]bool {
 }
 
 // matches decides whether a given process's traffic should go through the
-// tunnel. An empty IncludedApps list means the profile has no per-app
-// selection at all — treated as full-tunnel (route everything), matching
-// how every other VPN client behaves by default; per-app split is opt-in
-// via the Apps picker, not opt-out.
+// tunnel. An empty app selection matches all traffic only if no domain
+// lists are selected either; domain-only profiles match by destination IP.
 func (t *outboundTunnel) matches(exePath string) bool {
 	if t == nil {
 		return false
@@ -213,7 +213,7 @@ func (t *outboundTunnel) matches(exePath string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	if len(t.includedApps) == 0 {
-		return true
+		return t.isFullTunnelLocked()
 	}
 	if exePath == "" {
 		return false
@@ -228,13 +228,27 @@ func (t *outboundTunnel) matches(exePath string) bool {
 	return false
 }
 
-// isFullTunnel reports whether this profile has no app selection, i.e.
+// isFullTunnel reports whether this profile has no app or domain selection, i.e.
 // routes everything not claimed by another connected profile — see
 // Bridge.pickTunnel.
 func (t *outboundTunnel) isFullTunnel() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return len(t.includedApps) == 0
+	return t.isFullTunnelLocked()
+}
+
+func (t *outboundTunnel) isFullTunnelLocked() bool {
+	return fullTunnelForSelection(len(t.includedApps), t.domainListCount) && len(t.domains) == 0
+}
+
+// updateSelection publishes app and domain selectors atomically.
+func (t *outboundTunnel) updateSelection(apps, domains []string, domainListCount int) {
+	included := buildIncludedApps(apps)
+	t.mu.Lock()
+	t.includedApps = included
+	t.domains = domains
+	t.domainListCount = domainListCount
+	t.mu.Unlock()
 }
 
 // sharedApp returns the first of apps this tunnel already routes, or ""

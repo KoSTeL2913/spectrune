@@ -217,7 +217,7 @@ func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
 	// dropping every other in-flight connection with it) just to change
 	// which apps route through it.
 	if live {
-		s.bridge.UpdateTunnel(cfg.Name, cfg.Interface.IncludedApps, resolveDomainLists(cfg.Interface.IncludedDomainLists))
+		s.bridge.UpdateTunnel(cfg.Name, cfg.Interface.IncludedApps, resolveDomainLists(cfg.Interface.IncludedDomainLists), len(cfg.Interface.IncludedDomainLists))
 	}
 	return nil
 }

@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-unformatted=$(gofmt -l .)
+# Third-party sources retain upstream formatting.
+unformatted=$(gofmt -l cmd internal)
 if [ -n "$unformatted" ]; then
 	echo "gofmt needed:" >&2
 	echo "$unformatted" >&2

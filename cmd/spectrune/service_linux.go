@@ -128,8 +128,7 @@ func (s *Service) SaveProfile(cfg LinuxConfig, _ *struct{}) error {
 	isActive := s.bridge != nil && s.activeProfile == cfg.Name
 	s.mu.Unlock()
 	if isActive {
-		bridge.UpdateIncludedApps(cfg.IncludedApps)
-		bridge.UpdateIncludedDomainLists(cfg.IncludedDomainLists)
+		bridge.UpdateSelection(cfg.IncludedApps, cfg.IncludedDomainLists)
 	}
 	return nil
 }
