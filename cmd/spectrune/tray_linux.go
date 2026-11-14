@@ -9,7 +9,7 @@ package main
 
 /*
 #cgo pkg-config: gtk+-3.0
-#include <gtk/gtk.h>
+#include "gui_window_linux.h"
 #include <stdlib.h>
 
 extern void goTrayActivate(GtkStatusIcon*, gpointer);
@@ -27,8 +27,7 @@ static void spectrune_hide_to_tray_on_close(GtkWidget *win) {
 }
 
 static void spectrune_window_show(GtkWidget *win) {
-	gtk_widget_show(win);
-	gtk_window_present(GTK_WINDOW(win));
+	spectrune_present_window(win);
 }
 
 // spectrune_set_min_size overrides the WebKitGTK view's own default minimum

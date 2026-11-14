@@ -89,41 +89,13 @@ func activateExistingGUIWindow() bool {
 	if hwnd == 0 {
 		return false
 	}
-	// SW_SHOW first, THEN SW_RESTORE — belt and suspenders for exactly
-	// which one actually reverses hideToTrayOnClose's ShowWindow(SW_HIDE)
-	// reliably: SW_RESTORE's documented job is un-minimizing a window
-	// that's minimized-but-still-shown, not necessarily un-hiding one
-	// that's fully hidden; SW_SHOW is the one Win32 actually documents
-	// for that.
+	// Restore the existing HWND, then borrow the foreground thread's input
+	// queue using the same path as the initial window presentation.
 	procShowWindow.Call(hwnd, swShow)
 	procShowWindow.Call(hwnd, swRestore)
-	// Plain SetForegroundWindow from here routinely loses to Windows'
-	// foreground-lock restriction: the calling process IS this fresh
-	// /gui launch (which does have the user-input-triggered right to
-	// take foreground), but the WINDOW it's trying to raise belongs to
-	// a completely different process, and Windows only honors that for
-	// the process that itself has the right, not whatever window it
-	// asks for. The documented, standard workaround is to attach this
-	// thread's input state to the target window's thread first — while
-	// attached, Windows treats a SetForegroundWindow call from either
-	// thread as if it came from the (allowed) one. Without this, the
-	// call still "succeeds" (no error) but silently does nothing beyond
-	// flashing the target's taskbar button — exactly what was reported
-	// live 2026-09-23 ("моргает и все", clicking the desktop icon while
-	// already running just blinks and brings nothing forward).
-	var targetPID uint32
-	targetTID, _, _ := procGetWindowThreadPID.Call(hwnd, uintptr(unsafe.Pointer(&targetPID)))
-	currentTID := windows.GetCurrentThreadId()
-	attached := false
-	if targetTID != 0 && uint32(targetTID) != currentTID {
-		ret, _, _ := procAttachThreadInput.Call(uintptr(currentTID), targetTID, 1)
-		attached = ret != 0
-	}
-	procSetForegroundWindow.Call(hwnd)
-	if attached {
-		procAttachThreadInput.Call(uintptr(currentTID), targetTID, 0)
-	}
-	return true
+	forceForeground(hwnd)
+	foreground, _, _ := procGetForegroundWindow.Call()
+	return foreground == hwnd
 }
 
 // forceForeground makes hwnd — THIS process's own, just-created GUI
@@ -246,39 +218,23 @@ func runGUI(retryMutex bool) {
 	// GUI. On a second launch, activate the existing window instead of
 	// just exiting silently — otherwise clicking the shortcut again while
 	// the app is minimized to tray looks like it did nothing.
-	mutexName, _ := windows.UTF16PtrFromString(`Global\SpectruneGUISingleInstance`)
-	var mutex windows.Handle
-	var mutexErr error
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		mutex, mutexErr = windows.CreateMutex(nil, false, mutexName)
-		if mutexErr != windows.ERROR_ALREADY_EXISTS || !retryMutex || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	if mutexErr == windows.ERROR_ALREADY_EXISTS {
-		// A couple retries, not just one shot — activateExistingGUIWindow
-		// finds the other window by exact title via FindWindowW, and a
-		// launch that races the *other* instance's own startup (still
-		// mid-navigate, title not applied yet — unlikely but not
-		// impossible) would otherwise fail this permanently instead of
-		// just needing a moment.
-		activated := false
-		for attempt := 0; attempt < 3; attempt++ {
-			if activateExistingGUIWindow() {
-				activated = true
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		if !activated {
-			log.Printf("another Spectrune GUI instance is already running but its window wasn't found after retrying — exiting anyway")
-		}
+	mutex, existing, err := acquireWindowsGUIMutex(retryMutex)
+	if err != nil {
+		log.Printf("cannot guard the Spectrune GUI: %v", err)
 		return
 	}
 	if mutex != 0 {
 		defer windows.CloseHandle(mutex)
+	}
+	if existing {
+		for attempt := 0; attempt < 25; attempt++ {
+			if activateExistingGUIWindow() {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		log.Printf("existing Spectrune GUI did not expose its window; refusing a duplicate")
+		return
 	}
 
 	registerForRestart()

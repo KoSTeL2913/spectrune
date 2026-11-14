@@ -179,7 +179,9 @@ func dispatch(cmd string, args []string) bool {
 		fatalIf(client.Call("Bridge.DeleteDomainList", args[0], &struct{}{}))
 		fmt.Printf("deleted domain list: %s\n", args[0])
 	case "/gui":
-		runGUI()
+		runGUI(false)
+	case "/gui-restart":
+		runGUI(true)
 	case "/wait-and-reopen":
 		// Spawned by webui_linux.go's closeForUpdate right before the GUI
 		// closes itself for an in-progress update — see update_linux.go's

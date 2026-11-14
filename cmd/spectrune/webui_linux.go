@@ -70,9 +70,19 @@ func writeUIHTMLFile(html string) (string, error) {
 	return path, nil
 }
 
-func runGUI() {
+func runGUI(retry bool) {
+	instance, err := acquireLinuxGUIInstance(retry)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	if instance == nil {
+		return
+	}
 	w := webview.New(false)
 	defer w.Destroy()
+	defer instance.close()
+	instance.attach(w.Window())
 	w.SetTitle(guiWindowTitle)
 	// Width matches the 613 floor set below via setMinSize — opening
 	// narrower than that and then immediately snapping wider once the
@@ -343,7 +353,7 @@ func bindAPI(w webview.WebView) {
 		}
 		relaunchArg := "/wait-and-reopen"
 		if alreadyDone {
-			relaunchArg = "/gui"
+			relaunchArg = "/gui-restart"
 		}
 		if err := exec.Command(exePath, relaunchArg).Start(); err != nil {
 			return err

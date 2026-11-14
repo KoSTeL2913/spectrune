@@ -237,7 +237,7 @@ func waitAndReopen() {
 			if callErr == nil && v != "" && v != appVersion {
 				log.Printf("waitAndReopen: daemon now running %s, relaunching GUI", v)
 				if exePath, err := os.Executable(); err == nil {
-					exec.Command(exePath, "/gui").Start()
+					exec.Command(exePath, "/gui-restart").Start()
 				}
 				return
 			}

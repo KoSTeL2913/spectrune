@@ -21,7 +21,7 @@ actual GTK4 rewrite, unrelated). `pkgconfig-shim/webkit2gtk-4.0.pc` and
 packages under the old name.
 
 Runtime (not just build-time) needs `libwebkit2gtk-4.1-0`, `libgtk-3-0`,
-`iproute2`, `util-linux`, `iptables`, and `ipset` — already declared as
+`iproute2`, `util-linux`, `iptables`, `ipset`, and a D-Bus user session (`dbus-user-session` or `dbus-x11`) — already declared as
 `.deb` dependencies (`linux-build/DEBIAN/control`); a tarball install
 needs them installed separately.
 
@@ -53,3 +53,7 @@ First run: the daemon creates a `spectrune` system group and adds
 sudo). **You need a fresh login shell/session for that group membership
 to take effect** — `sg spectrune -c '...'` works around this without a
 full re-login.
+
+The GUI registers a single instance on the desktop session bus. Reopening its
+launcher activates the existing window, including when it is minimized or hidden
+in the tray. The daemon and CLI commands do not require a desktop session bus.
