@@ -55,8 +55,11 @@ type outboundTunnel struct {
 	// lower-cased, no-trailing-dot domains resolved from the profile's
 	// enabled domain lists (updateDomains); domainIPs is what
 	// observeDNSResponse populates and matchesDomainIP checks.
-	domains   []string
-	domainIPs map[string]bool
+	domains         []string
+	domainIPs       map[string]bool
+	priorityDomains []string
+	priorityIPs     map[string]bool
+	domainAnswers   map[string][]string
 }
 
 func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel, error) {
@@ -136,7 +139,7 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 
 	included := buildIncludedApps(cfg.Interface.IncludedApps)
 
-	resolvedDomains := resolveDomainLists(cfg.Interface.IncludedDomainLists)
+	resolvedDomains := resolveDomainLists(effectiveDomainLists(cfg.Name, cfg.Interface.IncludedDomainLists))
 	if len(resolvedDomains) > 0 {
 		log.Printf("newOutboundTunnel: domain lists %v resolved to %v", cfg.Interface.IncludedDomainLists, resolvedDomains)
 	}
@@ -149,6 +152,7 @@ func newOutboundTunnel(cfg *conf.Config, realIfaceIndex uint32) (*outboundTunnel
 		includedApps:    included,
 		domainListCount: len(cfg.Interface.IncludedDomainLists),
 		domains:         resolvedDomains,
+		priorityDomains: resolveDomainLists(explicitDomainLists(cfg.Name)),
 		domainIPs:       make(map[string]bool),
 	}, nil
 }
@@ -238,7 +242,7 @@ func (t *outboundTunnel) isFullTunnel() bool {
 }
 
 func (t *outboundTunnel) isFullTunnelLocked() bool {
-	return fullTunnelForSelection(len(t.includedApps), t.domainListCount) && len(t.domains) == 0
+	return fullTunnelForSelection(len(t.includedApps), t.domainListCount)
 }
 
 // updateSelection publishes app and domain selectors atomically.
@@ -248,6 +252,8 @@ func (t *outboundTunnel) updateSelection(apps, domains []string, domainListCount
 	t.includedApps = included
 	t.domains = domains
 	t.domainListCount = domainListCount
+	t.domainIPs = selectedDomainIPs(t.domainAnswers, t.domains)
+	t.priorityIPs = selectedDomainIPs(t.domainAnswers, t.priorityDomains)
 	t.mu.Unlock()
 }
 
@@ -289,12 +295,13 @@ func (t *outboundTunnel) updateIncludedApps(apps []string) {
 // updateDomains swaps in a new domain-list selection (resolved to a flat
 // domain slice by the caller — see resolveDomainLists) for an already-
 // running tunnel, same live-update reasoning as updateIncludedApps.
-// Deliberately does NOT clear domainIPs: an IP already learned for a
-// domain that's still enabled should keep matching immediately rather
-// than waiting for that domain to be re-resolved.
+// Rebuild from name-associated answers so disabled domains stop matching
+// immediately, while enabled domains retain their cached destinations.
 func (t *outboundTunnel) updateDomains(domains []string) {
 	t.mu.Lock()
 	t.domains = domains
+	t.domainIPs = selectedDomainIPs(t.domainAnswers, t.domains)
+	t.priorityIPs = selectedDomainIPs(t.domainAnswers, t.priorityDomains)
 	t.mu.Unlock()
 }
 
@@ -313,13 +320,7 @@ func (t *outboundTunnel) matchesDomainIP(ip string) bool {
 // matchingDomain returns the configured domain queried matches (itself
 // or a subdomain of it), or "" if none do. Caller must hold t.mu.
 func (t *outboundTunnel) matchingDomainLocked(queried string) string {
-	queried = strings.ToLower(strings.TrimSuffix(queried, "."))
-	for _, d := range t.domains {
-		if queried == d || strings.HasSuffix(queried, "."+d) {
-			return d
-		}
-	}
-	return ""
+	return matchingSelectedDomain(queried, t.domains)
 }
 
 // observeDNSResponse parses a single, already-deframed DNS response
@@ -353,7 +354,7 @@ func (t *outboundTunnel) observeDNSResponse(payload []byte) {
 		return
 	}
 	questions, err := parser.AllQuestions()
-	if err != nil || len(questions) == 0 {
+	if err != nil || len(questions) == 0 || questions[0].Type != dnsmessage.TypeA {
 		return
 	}
 	queried := questions[0].Name.String()
@@ -374,17 +375,28 @@ func (t *outboundTunnel) observeDNSResponse(payload []byte) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.matchingDomainLocked(queried) == "" {
+		return
+	}
+	var addresses []string
 	for _, a := range answers {
 		if a.Header.Type != dnsmessage.TypeA {
 			continue
 		}
 		r := a.Body.(*dnsmessage.AResource)
 		ip := net.IP(r.A[:]).String()
+		addresses = append(addresses, ip)
 		if !t.domainIPs[ip] {
 			t.domainIPs[ip] = true
 			log.Printf("Spectrune: domain %q (matched list entry %q) -> %s added to tunnel", queried, matched, ip)
 		}
 	}
+	if t.domainAnswers == nil {
+		t.domainAnswers = make(map[string][]string)
+	}
+	t.domainAnswers[strings.ToLower(strings.TrimSuffix(queried, "."))] = addresses
+	t.domainIPs = selectedDomainIPs(t.domainAnswers, t.domains)
+	t.priorityIPs = selectedDomainIPs(t.domainAnswers, t.priorityDomains)
 }
 
 // hasHandshake reports whether the WireGuard/AmneziaWG session has ever
@@ -417,4 +429,10 @@ func (t *outboundTunnel) dial(ctx context.Context, addr netip.AddrPort) (net.Con
 
 func (t *outboundTunnel) dialUDP(addr netip.AddrPort) (net.Conn, error) {
 	return t.net.DialUDPAddrPort(netip.AddrPort{}, addr)
+}
+
+func (t *outboundTunnel) matchesPriorityDomainIP(ip string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.priorityIPs[ip]
 }

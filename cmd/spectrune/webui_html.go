@@ -832,6 +832,7 @@ const webUIHTML = `<!DOCTYPE html>
     <button class="primary" id="domains-back"><svg class="i sm"><use href="#i-check"/></svg><span data-i18n="done">Done</span></button>
   </div>
   <p class="hint" data-i18n="domainsHint">Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list's domains with "Edit".</p>
+  <div id="domains-error" class="error" style="display:none"></div>
   <ul id="domains-list" class="app-list panel flex-grow"></ul>
   <div class="list-footer">
     <span></span>
@@ -900,6 +901,7 @@ var I18N = {
   en: {
     add: 'Add…', edit: 'Edit…', apps: 'Apps…', domains: 'Domains…', delete: 'Delete',
     connectedShort: 'Connected', connectingShort: 'Connecting…', errorShort: 'Error',
+    domainRoute: 'Route', domainRouteDefault: 'Use profile selection', domainRouteHint: 'Route this list through the selected connection. The connection must be active. Changes apply immediately.',
     routingFullTunnel: 'All traffic', routingAppsCount: 'Apps: %d', routingDomainListsCount: 'Domain lists: %d',
     connect: 'Connect', disconnect: 'Disconnect',
     confirmDelete: 'Delete profile "%s"?',
@@ -941,7 +943,7 @@ var I18N = {
     themeBgFit: 'Fit', themeBgFitContain: 'Whole photo', themeBgFitCover: 'Fill (crop)',
     themeSpace: 'Space background', themeStars: 'Stars over the photo', themeAnim: 'Animations',
     domainLists: 'Domain lists',
-    domainsHint: 'Toggle a list on to route every domain in it through this tunnel, regardless of which application accesses it. Edit a list\'s domains with "Edit".',
+    domainsHint: 'Enable a list for this profile or choose its connection in the route selector. The connection choice applies to the whole list immediately and requires an active connection.',
     domainsNewList: 'New list…', domainEditHint: 'One domain per line (e.g. discord.com) — subdomains are matched automatically.',
     domainListNamePrompt: 'Name for this domain list:', domainListConfirmDelete: 'Delete domain list "%s"?',
     domainListEdit: 'Edit', domainListNoLists: 'No domain lists yet — use "New list…" to create one.',
@@ -966,6 +968,7 @@ var I18N = {
   ru: {
     add: 'Добавить…', edit: 'Изменить…', apps: 'Приложения…', domains: 'Домены…', delete: 'Удалить',
     connectedShort: 'Подключено', connectingShort: 'Подключение…', errorShort: 'Ошибка',
+    domainRoute: 'Маршрут', domainRouteDefault: 'По выбору в профилях', domainRouteHint: 'Направлять этот список через выбранное подключение. Подключение должно быть активно. Изменения применяются сразу.',
     routingFullTunnel: 'Весь трафик', routingAppsCount: 'Приложений: %d', routingDomainListsCount: 'Списков доменов: %d',
     connect: 'Подключить', disconnect: 'Отключить',
     confirmDelete: 'Удалить профиль «%s»?',
@@ -1007,7 +1010,7 @@ var I18N = {
     themeBgFit: 'Заполнение', themeBgFitContain: 'Целиком', themeBgFitCover: 'На весь экран (обрезка)',
     themeSpace: 'Космический фон', themeStars: 'Звёзды поверх фото', themeAnim: 'Анимации',
     domainLists: 'Списки доменов',
-    domainsHint: 'Включите список, чтобы направить все его домены через этот туннель — независимо от того, какое приложение к ним обращается. Кнопка «Изменить» редактирует домены списка.',
+    domainsHint: 'Включите список для этого профиля или выберите подключение в поле маршрута. Выбор подключения действует для всего списка и применяется сразу. Для передачи трафика подключение должно быть активно.',
     domainsNewList: 'Новый список…', domainEditHint: 'По одному домену на строку (например, discord.com) — поддомены учитываются автоматически.',
     domainListNamePrompt: 'Название списка доменов:', domainListConfirmDelete: 'Удалить список доменов «%s»?',
     domainListEdit: 'Изменить', domainListNoLists: 'Списков доменов пока нет — нажмите «Новый список…», чтобы создать.',
@@ -2019,7 +2022,7 @@ $('btn-save').onclick = function() {
 };
 
 function showEditError(err) {
-  var e = $('edit-error');
+  var e = $('view-domains').classList.contains('active') ? $('domains-error') : $('edit-error');
   e.style.display = 'block';
   e.textContent = String(err);
 }
@@ -2308,19 +2311,23 @@ $('btn-browse-app').onclick = function() {
 
 
 function openDomainsPicker() {
+  $('domains-error').style.display = 'none';
   show('view-domains');
   refreshDomainLists();
 }
 
 function refreshDomainLists() {
-  listDomainLists().then(function(names) {
-    state.domainLists = names || [];
+  Promise.all([listDomainLists(), getDomainRoutes(), listProfiles()]).then(function(values) {
+    state.domainLists = values[0] || [];
+    state.domainRoutes = values[1] || {};
+    state.routeProfiles = values[2] || [];
     renderDomainsList();
   }).catch(showEditError);
 }
 
 function renderDomainsList() {
   var ul = $('domains-list');
+  $('domains-error').style.display = 'none';
   ul.innerHTML = '';
   if (state.domainLists.length === 0) {
     var empty = document.createElement('li');
@@ -2371,6 +2378,26 @@ function renderDomainsList() {
 
     li.appendChild(label);
     li.appendChild(text);
+    var route = document.createElement('select');
+    route.setAttribute('aria-label', t('domainRoute') + ': ' + name);
+    route.title = t('domainRouteHint');
+    var def = document.createElement('option');
+    def.value = ''; def.textContent = t('domainRouteDefault'); route.appendChild(def);
+    (state.routeProfiles || []).forEach(function(profile) {
+      var option = document.createElement('option'); option.value = profile;
+      option.textContent = profile + (Object.prototype.hasOwnProperty.call(state.active, profile) ? '' : ' (' + t('statusOff') + ')');
+      route.appendChild(option);
+    });
+    route.value = state.domainRoutes[name] || '';
+    cb.disabled = !!route.value;
+    if (route.value) cb.checked = route.value === $('edit-name').value.trim();
+    route.onchange = function() {
+      route.disabled = true;
+      setDomainRoute(name, route.value).then(function() { refreshDomainLists(); }).catch(function(err) {
+        route.disabled = false; route.value = state.domainRoutes[name] || ''; showEditError(err);
+      });
+    };
+    li.appendChild(route);
     li.appendChild(editBtn);
     li.appendChild(delBtn);
     ul.appendChild(li);

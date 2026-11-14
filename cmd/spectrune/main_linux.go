@@ -127,11 +127,14 @@ func dispatch(cmd string, args []string) bool {
 		defer client.Close()
 		req := LaunchAppRequest{
 			DesktopID: args[0],
+			CallerPID: os.Getpid(),
 			Env: map[string]string{
 				"DISPLAY":                  os.Getenv("DISPLAY"),
 				"WAYLAND_DISPLAY":          os.Getenv("WAYLAND_DISPLAY"),
 				"XDG_RUNTIME_DIR":          os.Getenv("XDG_RUNTIME_DIR"),
 				"DBUS_SESSION_BUS_ADDRESS": os.Getenv("DBUS_SESSION_BUS_ADDRESS"),
+				"LANG":                     os.Getenv("LANG"),
+				"XAUTHORITY":               os.Getenv("XAUTHORITY"),
 				"_CALLER_UID":              fmt.Sprint(os.Getuid()),
 				"_CALLER_GID":              fmt.Sprint(os.Getgid()),
 			},

@@ -7,13 +7,13 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // DesktopApp is what the GUI's app picker lists — id is the .desktop
@@ -189,6 +189,7 @@ func stripFieldCodes(execLine string) []string {
 // desktop, use the sound server, talk to D-Bus, etc.
 type LaunchAppRequest struct {
 	DesktopID string
+	CallerPID int
 	Env       map[string]string // DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS
 }
 
@@ -201,20 +202,22 @@ func execTargetBase(execLine string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	// Environment wrappers are not the application's process name.
+	if filepath.Base(args[0]) == "env" {
+		args = args[1:]
+		for len(args) > 0 && (strings.HasPrefix(args[0], "-") || strings.Contains(args[0], "=")) {
+			args = args[1:]
+		}
+		if len(args) == 0 {
+			return ""
+		}
+	}
 	return filepath.Base(args[0])
 }
 
-// LaunchApp starts the given .desktop entry's command as the calling
-// user (no privilege drop needed here — the daemon just runs it exactly
-// like a normal launcher would) and immediately moves the resulting PID
-// into the routing cgroup (routing_linux.go's addPIDToCgroup) so it's
-// tunneled from its very first packet, rather than waiting for the next
-// matchLoop tick. Unlike the old namespace-based version, this is *not*
-// trying to force a separate instance — if the app has single-instance
-// locking and hands off to an already-running one, that's fine now: the
-// whole point of switching to cgroups was to be able to include an
-// already-running process directly, so there's nothing to work around.
-func launchApp(req LaunchAppRequest) error {
+// launchApp starts a desktop entry as its user, with the user's home and
+// session environment, in the cgroup selected by the active profile.
+func launchApp(req LaunchAppRequest, bridge *LinuxBridge) error {
 	var target DesktopApp
 	found := false
 	apps, err := listDesktopApps()
@@ -242,32 +245,76 @@ func launchApp(req LaunchAppRequest) error {
 		uidStr, gidStr = u.Uid, u.Gid
 	}
 
-	args := []string{"--reuid=" + uidStr, "--regid=" + gidStr, "--clear-groups", "--inh-caps=-all", "--", "env"}
-	for _, k := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
-		if v, ok := req.Env[k]; ok && v != "" {
-			args = append(args, k+"="+v)
+	u, err := user.LookupId(uidStr)
+	if err != nil {
+		return err
+	}
+	args := []string{"--reuid=" + uidStr, "--regid=" + gidStr, "--init-groups", "--inh-caps=-all", "--"}
+	args = append(args, stripFieldCodes(target.Exec)...)
+	cmd := exec.Command("setpriv", args...)
+	cmd.Dir = u.HomeDir
+	cmd.Env = []string{"HOME=" + u.HomeDir, "USER=" + u.Username, "LOGNAME=" + u.Username, "PATH=" + filepath.Join(u.HomeDir, ".local/bin") + ":/usr/local/bin:/usr/bin:/bin"}
+	for _, k := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "XAUTHORITY"} {
+		if value := req.Env[k]; value != "" {
+			cmd.Env = append(cmd.Env, k+"="+value)
 		}
 	}
-	args = append(args, stripFieldCodes(target.Exec)...)
-
-	cmd := exec.Command("setpriv", args...)
-	// Detached, not waited on — this is "open an app," not "run a command
-	// and collect its output." The launched app keeps running after this
-	// RPC returns, same as double-clicking it normally would.
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("setpriv: %w", err)
+	// Launch outside the daemon's service cgroup so a service restart does
+	// not kill the user's application. Respect its current route selection.
+	home := "/"
+	if req.CallerPID > 1 {
+		if info, err := os.Stat(fmt.Sprintf("/proc/%d", req.CallerPID)); err == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok && fmt.Sprint(stat.Uid) == uidStr {
+				if cg := cgroupOf(req.CallerPID); cg != "" && cg != ownCgroup {
+					home = cg
+				}
+			}
+		}
 	}
-	pid := cmd.Process.Pid
-	go cmd.Wait() // reap it, avoid a zombie; nothing else needs its exit status
-
-	// Best-effort — if this fails (e.g. the process already exited, or
-	// itself immediately re-exec'd into something with a different PID,
-	// which setpriv's own exec doesn't do), matchLoop will pick it up on
-	// its own within matchInterval anyway once it (or whatever it forked)
-	// shows up under its real name.
-	if err := addPIDToCgroup(pid); err != nil {
-		log.Printf("launchApp: addPIDToCgroup(%d): %v (matchLoop will retry)", pid, err)
+	selected := false
+	if bridge != nil {
+		bridge.mu.Lock()
+		defer bridge.mu.Unlock()
+		base := strings.ToLower(execTargetBase(target.Exec))
+		for _, target := range bridge.includedApps {
+			if base == strings.ToLower(target) {
+				selected = true
+				break
+			}
+		}
 	}
+	destination := home
+	if selected {
+		destination = ownCgroup
+	}
+	cg, err := os.Open(filepath.Join(cgroupMount, destination))
+	if err != nil {
+		return fmt.Errorf("launch cgroup: %w", err)
+	}
+	defer cg.Close()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, UseCgroupFD: true, CgroupFD: int(cg.Fd())}
+	if err = cmd.Start(); err != nil {
+		// Older kernels may lack clone3/CLONE_INTO_CGROUP. Move immediately
+		// after fork there; current kernels attach before the first packet.
+		cmd.SysProcAttr.UseCgroupFD = false
+		if err = cmd.Start(); err != nil {
+			return fmt.Errorf("launch: %w", err)
+		}
+		if err = os.WriteFile(filepath.Join(cgroupMount, destination, "cgroup.procs"), []byte(strconv.Itoa(cmd.Process.Pid)), 0644); err != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+			return fmt.Errorf("launch cgroup: %w", err)
+		}
+	}
+	if selected {
+		if bridge.origin == nil {
+			bridge.origin = make(map[int]string)
+		}
+		bridge.origin[cmd.Process.Pid] = home
+		saveOrigins(bridge.origin)
+	}
+	go cmd.Wait()
+
 	return nil
 }
 
@@ -287,6 +334,12 @@ func resolveAppBinaries(desktopIDs []string) []string {
 	}
 	var out []string
 	for _, id := range desktopIDs {
+		if filepath.IsAbs(id) {
+			if info, err := os.Stat(id); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+				out = append(out, filepath.Base(id))
+			}
+			continue
+		}
 		if a, ok := byID[id]; ok {
 			if base := execTargetBase(a.Exec); base != "" {
 				out = append(out, base)

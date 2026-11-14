@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,8 @@ type netTun struct {
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
+	closed         chan struct{}
+	closeOnce      sync.Once
 }
 
 type Net netTun
@@ -64,6 +67,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
 		dnsServers:     dnsServers,
+		closed:         make(chan struct{}),
 		mtu:            mtu,
 	}
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
@@ -121,10 +125,13 @@ func (tun *netTun) Events() <-chan tun.Event {
 }
 
 func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	view, ok := <-tun.incomingPacket
-	if !ok {
+	var view *buffer.View
+	select {
+	case <-tun.closed:
 		return 0, os.ErrClosed
+	case view = <-tun.incomingPacket:
 	}
+	defer view.Release()
 
 	n, err := view.Read(buf[0][offset:])
 	if err != nil {
@@ -135,6 +142,11 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
+	select {
+	case <-tun.closed:
+		return 0, os.ErrClosed
+	default:
+	}
 	for _, buf := range buf {
 		packet := buf[offset:]
 		if len(packet) == 0 {
@@ -148,8 +160,10 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		case 6:
 			tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
 		default:
+			pkb.DecRef()
 			return 0, syscall.EAFNOSUPPORT
 		}
+		pkb.DecRef()
 	}
 	return len(buf), nil
 }
@@ -163,23 +177,23 @@ func (tun *netTun) WriteNotify() {
 	view := pkt.ToView()
 	pkt.DecRef()
 
-	tun.incomingPacket <- view
+	select {
+	case tun.incomingPacket <- view:
+	case <-tun.closed:
+		view.Release()
+	}
 }
 
 func (tun *netTun) Close() error {
-	tun.stack.RemoveNIC(1)
-	tun.stack.Close()
-	tun.ep.RemoveNotify(tun.notifyHandle)
-	tun.ep.Close()
-
-	if tun.events != nil {
+	tun.closeOnce.Do(func() {
+		// Wake pending packet producers before stack shutdown waits for them.
+		close(tun.closed)
+		tun.ep.RemoveNotify(tun.notifyHandle)
+		tun.stack.RemoveNIC(1)
+		tun.stack.Close()
+		tun.ep.Close()
 		close(tun.events)
-	}
-
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
-	}
-
+	})
 	return nil
 }
 

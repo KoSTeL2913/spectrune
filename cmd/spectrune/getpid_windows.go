@@ -96,7 +96,7 @@ const (
 	ownerLookupDelay   = 3 * time.Millisecond
 )
 
-func findTCPOwnerPID(localPort uint16) (uint32, error) {
+func findTCPOwnerPID(local, remote netip.AddrPort) (uint32, error) {
 	var lastErr error
 	for attempt := 0; attempt < ownerLookupRetries; attempt++ {
 		if attempt > 0 {
@@ -116,7 +116,7 @@ func findTCPOwnerPID(localPort uint16) (uint32, error) {
 		// routing the whole page load direct instead of through the
 		// tunnel. Confirmed live on win11-amneziawg 2026-09-22 (see
 		// [[per_app_routing_tcp_race]]).
-		pid, err := findTCPOwnerPIDOnce(localPort, attempt > 0)
+		pid, err := findTCPOwnerPIDOnce(local, remote, attempt > 0)
 		if err == nil {
 			return pid, nil
 		}
@@ -125,7 +125,7 @@ func findTCPOwnerPID(localPort uint16) (uint32, error) {
 	return 0, lastErr
 }
 
-func findTCPOwnerPIDOnce(localPort uint16, force bool) (uint32, error) {
+func findTCPOwnerPIDOnce(local, remote netip.AddrPort, force bool) (uint32, error) {
 	buf, err := fetchTCPTable(force)
 	if err != nil {
 		return 0, err
@@ -133,15 +133,15 @@ func findTCPOwnerPIDOnce(localPort uint16, force bool) (uint32, error) {
 
 	numEntries := binary.LittleEndian.Uint32(buf[0:4])
 	const rowSize = 24 // sizeof(mibTcpRowOwnerPid)
-	wantPort := swapPort(localPort)
+	wantPort := swapPort(local.Port())
 	for i := uint32(0); i < numEntries; i++ {
 		off := 4 + i*rowSize
 		row := (*mibTcpRowOwnerPid)(unsafe.Pointer(&buf[off]))
-		if uint32(wantPort) == row.LocalPort {
+		if uint32(wantPort) == row.LocalPort && row.OwningPid != 0 && row.LocalAddr == binary.LittleEndian.Uint32(local.Addr().AsSlice()) && row.RemoteAddr == binary.LittleEndian.Uint32(remote.Addr().AsSlice()) && row.RemotePort == uint32(swapPort(remote.Port())) {
 			return row.OwningPid, nil
 		}
 	}
-	return 0, fmt.Errorf("no owner found for port %d", localPort)
+	return 0, fmt.Errorf("no owner found for TCP %s -> %s", local, remote)
 }
 
 func swapPort(p uint16) uint16 {
@@ -194,7 +194,7 @@ func fetchUDPTable(force bool) ([]byte, error) {
 	return buf, nil
 }
 
-func findUDPOwnerPID(localPort uint16) (uint32, error) {
+func findUDPOwnerPID(local netip.AddrPort) (uint32, error) {
 	var lastErr error
 	for attempt := 0; attempt < ownerLookupRetries; attempt++ {
 		if attempt > 0 {
@@ -203,7 +203,7 @@ func findUDPOwnerPID(localPort uint16) (uint32, error) {
 		// See the matching comment in findTCPOwnerPID: without forcing
 		// a cache bypass, retries within the same ~200ms table-cache
 		// TTL just re-read the identical stale snapshot.
-		pid, err := findUDPOwnerPIDOnce(localPort, attempt > 0)
+		pid, err := findUDPOwnerPIDOnce(local, attempt > 0)
 		if err == nil {
 			return pid, nil
 		}
@@ -212,22 +212,31 @@ func findUDPOwnerPID(localPort uint16) (uint32, error) {
 	return 0, lastErr
 }
 
-func findUDPOwnerPIDOnce(localPort uint16, force bool) (uint32, error) {
+func findUDPOwnerPIDOnce(local netip.AddrPort, force bool) (uint32, error) {
 	buf, err := fetchUDPTable(force)
 	if err != nil {
 		return 0, err
 	}
 	numEntries := binary.LittleEndian.Uint32(buf[0:4])
 	const rowSize = 12 // sizeof(mibUdpRowOwnerPid)
-	wantPort := swapPort(localPort)
+	wantPort := swapPort(local.Port())
+	var wildcard uint32
 	for i := uint32(0); i < numEntries; i++ {
 		off := 4 + i*rowSize
 		row := (*mibUdpRowOwnerPid)(unsafe.Pointer(&buf[off]))
-		if uint32(wantPort) == row.LocalPort {
-			return row.OwningPid, nil
+		if uint32(wantPort) == row.LocalPort && row.OwningPid != 0 {
+			if row.LocalAddr == binary.LittleEndian.Uint32(local.Addr().AsSlice()) {
+				return row.OwningPid, nil
+			}
+			if row.LocalAddr == 0 {
+				wildcard = row.OwningPid
+			}
 		}
 	}
-	return 0, fmt.Errorf("no owner found for UDP port %d", localPort)
+	if wildcard != 0 {
+		return wildcard, nil
+	}
+	return 0, fmt.Errorf("no owner found for UDP %s", local)
 }
 
 // processPathCache avoids re-resolving the same PID's exe path on every one

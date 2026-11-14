@@ -35,6 +35,7 @@ func htons(i uint16) uint16 {
 type domainSniffer struct {
 	mu      sync.Mutex
 	domains []string // lower-cased, no trailing dot
+	cache   domainAnswerCache
 
 	stop chan struct{}
 	fd   int
@@ -47,13 +48,18 @@ func newDomainSniffer() *domainSniffer {
 func (d *domainSniffer) setDomains(domains []string) {
 	normalized := make([]string, 0, len(domains))
 	for _, dm := range domains {
-		dm = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(dm), "."))
+		dm = normalizeDomainRule(dm)
 		if dm != "" {
 			normalized = append(normalized, dm)
 		}
 	}
 	d.mu.Lock()
 	d.domains = normalized
+	// Updating a selection must remove previously learned destinations too.
+	runCmdIgnoreErr("ipset", "flush", domainSetName)
+	for ip := range selectedDomainIPs(d.cache.snapshot(), d.domains) {
+		runCmdIgnoreErr("ipset", "add", domainSetName, ip, "-exist")
+	}
 	d.mu.Unlock()
 }
 
@@ -137,12 +143,17 @@ func (d *domainSniffer) handlePacket(pkt []byte) {
 	}
 	dnsPayload := udp[8:udpLen]
 
+	d.handleDNSPayload(dnsPayload)
+}
+
+func (d *domainSniffer) handleDNSPayload(dnsPayload []byte) {
+	d.cache.observe(dnsPayload)
 	var parser dnsmessage.Parser
 	if _, err := parser.Start(dnsPayload); err != nil {
 		return
 	}
 	questions, err := parser.AllQuestions()
-	if err != nil || len(questions) == 0 {
+	if err != nil || len(questions) == 0 || questions[0].Type != dnsmessage.TypeA {
 		return
 	}
 	queried := questions[0].Name.String()
@@ -155,6 +166,11 @@ func (d *domainSniffer) handlePacket(pkt []byte) {
 	}
 	answers, err := parser.AllAnswers()
 	if err != nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if matchingSelectedDomain(queried, d.domains) == "" {
 		return
 	}
 	for _, a := range answers {

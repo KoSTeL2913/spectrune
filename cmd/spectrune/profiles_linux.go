@@ -16,7 +16,7 @@ import (
 
 const profilesDir = "/var/lib/spectrune/profiles"
 
-var validProfileName = regexp.MustCompile(`^[A-Za-z0-9 _.-]{1,64}$`)
+var validProfileName = regexp.MustCompile(`^[\p{L}\p{N} _.-]{1,64}$`)
 
 func profileNameIsValid(name string) bool {
 	return validProfileName.MatchString(name) && !strings.ContainsAny(name, "/\\")

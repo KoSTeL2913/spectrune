@@ -978,6 +978,24 @@ func bindAPI(w webview2.WebView) {
 		return nil
 	}))
 
+	must(w.Bind("getDomainRoutes", func() (map[string]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var routes map[string]string
+		err = client.Call("Bridge.GetDomainRoutes", struct{}{}, &routes)
+		return routes, err
+	}))
+	must(w.Bind("setDomainRoute", func(list, profile string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.SetDomainRoute", DomainRouteRequest{List: list, Profile: profile}, &struct{}{})
+	}))
 	must(w.Bind("listDomainLists", func() ([]string, error) {
 		client, err := ipcDial()
 		if err != nil {

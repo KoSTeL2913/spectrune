@@ -124,9 +124,9 @@ func (s *Service) SaveProfile(cfg LinuxConfig, _ *struct{}) error {
 	// already-running app "start tunneling," not just a pre-connect setup
 	// step.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	bridge := s.bridge
 	isActive := s.bridge != nil && s.activeProfile == cfg.Name
-	s.mu.Unlock()
 	if isActive {
 		bridge.UpdateSelection(cfg.IncludedApps, cfg.IncludedDomainLists)
 	}
@@ -148,7 +148,10 @@ func (s *Service) DeleteProfile(name string, _ *struct{}) error {
 	if s.activeProfile == name {
 		return fmt.Errorf("profile %q is currently connected — disconnect first", name)
 	}
-	return deleteProfile(name)
+	if err := deleteProfile(name); err != nil {
+		return err
+	}
+	return changeDomainRouteReferences("", name, "")
 }
 
 type RenameProfileRequest struct {
@@ -165,7 +168,10 @@ func (s *Service) RenameProfile(req RenameProfileRequest, _ *struct{}) error {
 	if req.OldName == req.NewName {
 		return nil
 	}
-	return renameProfile(req.OldName, req.NewName)
+	if err := renameProfile(req.OldName, req.NewName); err != nil {
+		return err
+	}
+	return changeDomainRouteReferences("", req.OldName, req.NewName)
 }
 
 func (s *Service) ListApps(_ struct{}, reply *[]DesktopApp) error {
@@ -208,27 +214,12 @@ func (s *Service) SaveDomainList(req DomainListSaveRequest, _ *struct{}) error {
 	if err := saveDomainList(req.Name, req.Domains); err != nil {
 		return err
 	}
-	// Live-update any connected profile that has this list enabled —
-	// otherwise editing a list's own domains while it's already toggled
-	// on for the active profile wouldn't take effect until a reconnect.
+	return s.refreshDomainList(req.Name)
+}
+func (s *Service) refreshDomainList(listName string) error {
 	s.mu.Lock()
-	bridge := s.bridge
-	name := s.activeProfile
-	s.mu.Unlock()
-	if bridge == nil {
-		return nil
-	}
-	cfg, err := loadProfile(name)
-	if err != nil {
-		return nil
-	}
-	for _, enabled := range cfg.IncludedDomainLists {
-		if enabled == req.Name {
-			bridge.UpdateIncludedDomainLists(cfg.IncludedDomainLists)
-			break
-		}
-	}
-	return nil
+	defer s.mu.Unlock()
+	return s.refreshDomainRoutesLocked()
 }
 
 func (s *Service) LoadDomainList(name string, reply *[]string) error {
@@ -241,7 +232,13 @@ func (s *Service) LoadDomainList(name string, reply *[]string) error {
 }
 
 func (s *Service) DeleteDomainList(name string, _ *struct{}) error {
-	return deleteDomainList(name)
+	if err := deleteDomainList(name); err != nil {
+		return err
+	}
+	if err := changeDomainRouteReferences(name, "", ""); err != nil {
+		return err
+	}
+	return s.refreshDomainList(name)
 }
 
 func (s *Service) ListAppPresets(_ struct{}, reply *[]string) error {
@@ -271,7 +268,9 @@ func (s *Service) DeleteAppPreset(name string, _ *struct{}) error {
 }
 
 func (s *Service) LaunchApp(req LaunchAppRequest, _ *struct{}) error {
-	return launchApp(req)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return launchApp(req, s.bridge)
 }
 
 // autoConnectOnStartup mirrors service_windows.go's — looks for exactly

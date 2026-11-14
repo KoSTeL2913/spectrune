@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -107,6 +108,9 @@ type Bridge struct {
 	// must be pinned to it (via IP_UNICAST_IF) or they'd loop back into
 	// our own TUN.
 	realIfaceIndex uint32
+	dnsProxy       *localDNSProxy
+	dnsConfigured  bool
+	dnsCache       domainAnswerCache
 
 	// tunnels are the outbound AmneziaWG tunnels currently connected, in
 	// connect order — one per active profile. Several can run at once
@@ -120,7 +124,7 @@ type Bridge struct {
 	tunnels []*namedTunnel
 
 	// fullExtras records whether the full-tunnel-only extras (IPv6
-	// default route + firewall block, tunnel DNS on the adapter) are
+	// default route + firewall block) are
 	// currently applied — see syncFullTunnelExtras.
 	fullExtras bool
 
@@ -170,6 +174,7 @@ type trackedConn struct {
 	procName  string
 	ancestors []string
 	dstIP     string
+	dstPort   uint16
 	tunnel    string // carrying tunnel's profile name, "" for direct
 	closer    io.Closer
 }
@@ -229,6 +234,11 @@ func (b *Bridge) AddTunnel(name string, cfg *conf.Config) error {
 }
 
 func (b *Bridge) addTunnel(name string, outTun *outboundTunnel) {
+	outTun.mu.Lock()
+	outTun.domainAnswers = b.dnsCache.snapshot()
+	outTun.domainIPs = selectedDomainIPs(outTun.domainAnswers, outTun.domains)
+	outTun.priorityIPs = selectedDomainIPs(outTun.domainAnswers, outTun.priorityDomains)
+	outTun.mu.Unlock()
 	if outTun.isFullTunnel() {
 		log.Printf("tunnel %q up, full-tunnel mode (no app selection, everything else routed)", name)
 	} else {
@@ -309,6 +319,18 @@ func (b *Bridge) tunnel(name string) *outboundTunnel {
 func (b *Bridge) pickTunnel(procName, dstIP string, ancestors ...string) *namedTunnel {
 	b.tunMu.RLock()
 	defer b.tunMu.RUnlock()
+	// An explicitly assigned list wins over overlapping ordinary selections.
+	for _, nt := range b.tunnels {
+		if nt.t.matchesPriorityDomainIP(dstIP) {
+			return nt
+		}
+	}
+	// Explicit domain destinations take priority over application routes.
+	for _, nt := range b.tunnels {
+		if nt.t.matchesDomainIP(dstIP) {
+			return nt
+		}
+	}
 	var full *namedTunnel
 	for _, nt := range b.tunnels {
 		if nt.t.isFullTunnel() {
@@ -317,7 +339,7 @@ func (b *Bridge) pickTunnel(procName, dstIP string, ancestors ...string) *namedT
 			}
 			continue
 		}
-		if nt.t.matches(procName) || nt.t.matchesDomainIP(dstIP) {
+		if nt.t.matches(procName) {
 			return nt
 		}
 	}
@@ -336,11 +358,24 @@ func (b *Bridge) pickTunnel(procName, dstIP string, ancestors ...string) *namedT
 // observeDNSResponse hands a DNS response to every connected tunnel, each
 // of which learns the IPs for its own domain lists.
 func (b *Bridge) observeDNSResponse(payload []byte) {
+	b.dnsCache.observe(payload)
 	b.tunMu.RLock()
 	defer b.tunMu.RUnlock()
 	for _, nt := range b.tunnels {
 		nt.t.observeDNSResponse(payload)
 	}
+}
+
+// otherFullTunnel protects both Connect and live selection changes.
+func (b *Bridge) otherFullTunnel(except string) string {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.name != except && nt.t.isFullTunnel() {
+			return nt.name
+		}
+	}
+	return ""
 }
 
 // fullTunnelDNS returns the DNS servers of the first connected full-tunnel
@@ -354,6 +389,41 @@ func (b *Bridge) fullTunnelDNS() ([]netip.Addr, bool) {
 		}
 	}
 	return nil, false
+}
+
+// DNS needs an explicit server on the capture adapter in split mode too.
+// Otherwise Windows can send router DNS with the capture adapter's source
+// address, and local-subnet DNS also bypasses domain observation entirely.
+func (b *Bridge) pickConnectionTunnel(procName, dstIP string, port uint16, ancestors ...string) *namedTunnel {
+	if port == 53 {
+		if nt := b.dnsTunnel(dstIP); nt != nil {
+			return nt
+		}
+	}
+	return b.pickTunnel(procName, dstIP, ancestors...)
+}
+
+func (b *Bridge) dnsTunnel(_ string) *namedTunnel {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	for _, nt := range b.tunnels {
+		if nt.t.isFullTunnel() {
+			return nt
+		}
+	}
+	if len(b.tunnels) > 0 {
+		return b.tunnels[0]
+	}
+	return nil
+}
+
+func (b *Bridge) splitTunnelDNS() []netip.Addr {
+	b.tunMu.RLock()
+	defer b.tunMu.RUnlock()
+	if len(b.tunnels) > 0 {
+		return b.tunnels[0].t.dns
+	}
+	return nil
 }
 
 // Start brings the bridge itself up: creates the Wintun adapter and
@@ -510,6 +580,20 @@ func (b *Bridge) Start() error {
 		return fmt.Errorf("configureWindowsInterface: %w", err)
 	}
 
+	// netsh returns while IPv4 duplicate-address detection is still pending.
+	// Wait for a bindable local address before reporting a working connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b.dnsProxy, err = newLocalDNSProxy(net.JoinHostPort(localDNSAddress, "53"), b.exchangeDNS, b.observeDNSResponse)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, windows.WSAEADDRNOTAVAIL) || time.Now().After(deadline) {
+			b.Stop()
+			return fmt.Errorf("local DNS proxy: %w", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	log.Printf("Bridge active.")
 	return nil
 }
@@ -530,6 +614,18 @@ func (b *Bridge) syncFullTunnelExtras() {
 		b.applyFullTunnelExtras(dns)
 	case !needed && applied:
 		b.removeFullTunnelExtras()
+	}
+	if !b.dnsConfigured {
+		if !needed {
+			dns = b.splitTunnelDNS()
+		}
+		if len(dns) > 0 {
+			if err := configureWintunDNS(b.ifaceAlias, dns); err != nil {
+				log.Printf("DNS configuration: %v", err)
+			} else {
+				b.dnsConfigured = true
+			}
+		}
 	}
 }
 
@@ -597,17 +693,6 @@ func (b *Bridge) applyFullTunnelExtras(tunDNS []netip.Addr) {
 	// finishing before Connect replies.
 	setIPv6Block(true, b.realIfaceIndex)
 
-	// Configure DNS on the Wintun adapter so Windows stops using the
-	// physical adapter's DNS (often a router IPv6 link-local like
-	// fe80::..., unreachable through the WireGuard tunnel) and uses a
-	// real resolver that flows through the tunnel instead. Without
-	// this, all hostname resolution fails in full-tunnel mode on
-	// machines where the router only advertises an IPv6 link-local
-	// DNS server (common on modern home routers with SLAAC).
-	if len(tunDNS) == 0 {
-		tunDNS = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
-	}
-	configureWintunDNS(b.ifaceAlias, tunDNS)
 }
 
 // removeFullTunnelExtras undoes applyFullTunnelExtras while the bridge
@@ -615,12 +700,11 @@ func (b *Bridge) applyFullTunnelExtras(tunDNS []netip.Addr) {
 // ones remain). Stop does the same cleanup on its own for a full
 // teardown.
 func (b *Bridge) removeFullTunnelExtras() {
-	log.Printf("no full-tunnel profile connected any more: restoring IPv6 and adapter DNS")
+	log.Printf("no full-tunnel profile connected any more: restoring IPv6")
 	if b.ipv6RouteAdded {
 		exec.Command("netsh", "interface", "ipv6", "delete", "route", "::/0", b.ifaceAlias).Run()
 		b.ipv6RouteAdded = false
 	}
-	resetWintunDNS(b.ifaceAlias)
 	setIPv6Block(false, b.realIfaceIndex)
 }
 
@@ -628,6 +712,10 @@ func (b *Bridge) removeFullTunnelExtras() {
 // (adapter/session, if any) before returning err — called only for
 // failures before the pumps start, so there's nothing else to stop.
 func (b *Bridge) failStart(err error) error {
+	if b.dnsProxy != nil {
+		b.dnsProxy.close()
+		b.dnsProxy = nil
+	}
 	if b.sessionStarted {
 		b.session.End()
 		b.sessionStarted = false
@@ -660,6 +748,7 @@ func (b *Bridge) UpdateTunnel(name string, apps, domains []string, domainListCou
 func (b *Bridge) UpdateDomains(name string, domains []string) {
 	if t := b.tunnel(name); t != nil {
 		t.updateDomains(domains)
+		b.closeStaleConns()
 	}
 }
 
@@ -722,7 +811,7 @@ func (b *Bridge) tunnelPrivateKeyInUse(key conf.Key) string {
 
 // trackConn registers a just-opened relayed connection and returns an id
 // to hand back to untrackConn once it finishes.
-func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer, ancestors ...string) uint64 {
+func (b *Bridge) trackConn(procName, dstIP, tunnel string, dstPort uint16, c io.Closer, ancestors ...string) uint64 {
 	b.connsMu.Lock()
 	defer b.connsMu.Unlock()
 	if b.conns == nil {
@@ -730,7 +819,7 @@ func (b *Bridge) trackConn(procName, dstIP, tunnel string, c io.Closer, ancestor
 	}
 	b.nextConnID++
 	id := b.nextConnID
-	b.conns[id] = &trackedConn{ancestors: ancestors, procName: procName, dstIP: dstIP, tunnel: tunnel, closer: c}
+	b.conns[id] = &trackedConn{ancestors: ancestors, procName: procName, dstIP: dstIP, dstPort: dstPort, tunnel: tunnel, closer: c}
 	return id
 }
 
@@ -751,7 +840,7 @@ func (b *Bridge) closeStaleConns() {
 	var stale []io.Closer
 	for _, c := range b.conns {
 		want := ""
-		if nt := b.pickTunnel(c.procName, c.dstIP, c.ancestors...); nt != nil {
+		if nt := b.pickConnectionTunnel(c.procName, c.dstIP, c.dstPort, c.ancestors...); nt != nil {
 			want = nt.name
 		}
 		if want != c.tunnel {
@@ -781,6 +870,10 @@ func (b *Bridge) Stop() {
 		exec.Command("netsh", "interface", "ipv6", "delete", "route", "::/0", deleteRouteAlias).Run()
 	}
 	resetWintunDNS(deleteRouteAlias)
+	if b.dnsProxy != nil {
+		b.dnsProxy.close()
+		b.dnsProxy = nil
+	}
 	// Best-effort cleanup, run in the background rather than blocking
 	// Stop()/the Disconnect RPC on it — same reasoning as blockIPv6Firewall's
 	// call in Start(). This one matters even more in practice: it runs on
@@ -898,13 +991,17 @@ func setIPv6Block(want bool, ifaceIndex uint32) {
 // back to disabling the ms_tcpip6 binding on that specific adapter, which
 // works unconditionally and does not depend on the Firewall rule API.
 func blockIPv6Firewall(ifaceIndex uint32) error {
+	// Windows 10 rejects an IPv6 /0 firewall prefix. Two /1 prefixes
+	// cover the same complete IPv6 address space and are accepted.
 	script := fmt.Sprintf(
 		`Remove-NetFirewallRule -DisplayName '%[1]s' -ErrorAction SilentlyContinue; `+
-			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -AddressFamily IPv6 -Profile Any`,
+			`New-NetFirewallRule -DisplayName '%[1]s' -Direction Outbound -Action Block -RemoteAddress '::/1','8000::/1' -Profile Any -ErrorAction Stop`,
 		ipv6FirewallRuleName,
 	)
-	if _, err := runPowerShellWithRetry(script); err == nil {
+	if out, err := runPowerShellWithRetry(script); err == nil {
 		return nil
+	} else {
+		log.Printf("IPv6 firewall rule failed, using adapter fallback: %v (%s)", err, out)
 	}
 	// Firewall rule failed — disable IPv6 binding on the real adapter instead.
 	script2 := fmt.Sprintf(
@@ -951,26 +1048,20 @@ func configureWindowsInterface(alias string) error {
 	return nil
 }
 
-// configureWintunDNS sets the DNS servers on the Wintun adapter so that
-// Windows uses them instead of whatever the physical adapter advertised
-// (often a router's IPv6 link-local address, which is unreachable through
-// the WireGuard tunnel and causes all DNS — and therefore all HTTPS — to
-// fail in full-tunnel mode). Only called in full-tunnel mode.
-func configureWintunDNS(alias string, dns []netip.Addr) {
+// Configure the native loopback proxy once for each capture adapter. The proxy chooses
+// the current profile's actual upstream DNS without changing OS settings
+// when app/domain selections change.
+func configureWintunDNS(alias string, dns []netip.Addr) error {
 	if len(dns) == 0 {
-		return
+		return nil
 	}
 	// Set primary; netsh replaces whatever was there.
 	if out, err := exec.Command("netsh", "interface", "ipv4", "set", "dns",
-		"name="+alias, "static", dns[0].String(), "primary").CombinedOutput(); err != nil {
-		log.Printf("warning: set DNS primary %s: %v (%s)", dns[0], err, out)
-		return
+		"name="+alias, "static", localDNSAddress, "primary", "validate=no").CombinedOutput(); err != nil {
+		return fmt.Errorf("set DNS %s: %w (%s)", alias, err, out)
 	}
-	for i, d := range dns[1:] {
-		exec.Command("netsh", "interface", "ipv4", "add", "dns",
-			"name="+alias, d.String(), fmt.Sprintf("index=%d", i+2)).Run()
-	}
-	log.Printf("full-tunnel DNS configured on adapter %s: %v", alias, dns)
+	log.Printf("DNS configured on adapter %s: %v", alias, dns)
+	return nil
 }
 
 // resetWintunDNS restores DHCP-assigned DNS on the Wintun adapter.
@@ -1020,7 +1111,9 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	appAddr := net.JoinHostPort(id.RemoteAddress.String(), portStr(id.RemotePort))
 	dstAddr := net.JoinHostPort(id.LocalAddress.String(), portStr(id.LocalPort))
 
-	pid, perr := findTCPOwnerPID(id.RemotePort)
+	localIP, _ := netip.AddrFromSlice(id.RemoteAddress.AsSlice())
+	remoteIP, _ := netip.AddrFromSlice(id.LocalAddress.AsSlice())
+	pid, perr := findTCPOwnerPID(netip.AddrPortFrom(localIP, id.RemotePort), netip.AddrPortFrom(remoteIP, id.LocalPort))
 	procName := "?"
 	if perr == nil {
 		if p, err := processPath(pid); err == nil {
@@ -1042,7 +1135,7 @@ func (b *Bridge) handleForwarded(r *tcp.ForwarderRequest) {
 	ancestors := processAncestorPaths(pid)
 	var nt *namedTunnel
 	if int(pid) != os.Getpid() {
-		nt = b.pickTunnel(procName, id.LocalAddress.String(), ancestors...)
+		nt = b.pickConnectionTunnel(procName, id.LocalAddress.String(), id.LocalPort, ancestors...)
 	}
 	if nt != nil {
 		log.Printf("  -> TUNNEL %q (matched %s)", nt.name, procName)
@@ -1065,7 +1158,8 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 	appAddr := net.JoinHostPort(id.RemoteAddress.String(), portStr(id.RemotePort))
 	dstAddr := net.JoinHostPort(id.LocalAddress.String(), portStr(id.LocalPort))
 
-	pid, perr := findUDPOwnerPID(id.RemotePort)
+	localIP, _ := netip.AddrFromSlice(id.RemoteAddress.AsSlice())
+	pid, perr := findUDPOwnerPID(netip.AddrPortFrom(localIP, id.RemotePort))
 	procName := "?"
 	if perr == nil {
 		if p, err := processPath(pid); err == nil {
@@ -1095,11 +1189,15 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 	ancestors := processAncestorPaths(pid)
 	var nt *namedTunnel
 	if int(pid) != os.Getpid() {
-		nt = b.pickTunnel(procName, id.LocalAddress.String(), ancestors...)
+		nt = b.pickConnectionTunnel(procName, id.LocalAddress.String(), id.LocalPort, ancestors...)
 	}
 	if nt != nil {
+		if id.LocalPort == 53 {
+			go b.relayDNS(local, nt, procName, id.LocalAddress.String(), ancestors...)
+			return
+		}
 		log.Printf("UDP %s -> %s (pid=%d exe=%q) -> TUNNEL %q", appAddr, dstAddr, pid, procName, nt.name)
-		go b.relayUDP(local, procName, id.LocalAddress.String(), nt.name, func() (net.Conn, error) {
+		go b.relayUDP(local, procName, id.LocalAddress.String(), nt.name, id.LocalPort, func() (net.Conn, error) {
 			addr, err := netip.ParseAddr(id.LocalAddress.String())
 			if err != nil {
 				return nil, err
@@ -1107,7 +1205,7 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 			return nt.t.dialUDP(netip.AddrPortFrom(addr, id.LocalPort))
 		}, onResponse, ancestors...)
 	} else {
-		go b.relayUDP(local, procName, id.LocalAddress.String(), "", func() (net.Conn, error) {
+		go b.relayUDP(local, procName, id.LocalAddress.String(), "", id.LocalPort, func() (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second, Control: b.bindToRealIface}
 			return d.Dial("udp4", dstAddr)
 		}, onResponse, ancestors...)
@@ -1126,8 +1224,8 @@ func (b *Bridge) handleUDPForwarded(r *udp.ForwarderRequest) {
 // regardless of which path carries it: an app that isn't itself included can still
 // resolve a domain that's in an enabled list, and that resolution needs
 // to be observed no matter which path carried the query.
-func (b *Bridge) relayUDP(local *gonet.UDPConn, procName, dstIP, tunnel string, dial func() (net.Conn, error), onResponse func([]byte), ancestors ...string) {
-	connID := b.trackConn(procName, dstIP, tunnel, local, ancestors...)
+func (b *Bridge) relayUDP(local *gonet.UDPConn, procName, dstIP, tunnel string, dstPort uint16, dial func() (net.Conn, error), onResponse func([]byte), ancestors ...string) {
+	connID := b.trackConn(procName, dstIP, tunnel, dstPort, local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	remote, err := dial()
@@ -1204,9 +1302,12 @@ func (s *dnsTCPSink) Write(p []byte) (int, error) {
 }
 
 func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP string, dstPort uint16, procName string, ancestors ...string) {
-	connID := b.trackConn(procName, dstIP, nt.name, local, ancestors...)
+	connID := b.trackConn(procName, dstIP, nt.name, dstPort, local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
+	if dstPort == 53 && len(nt.t.dns) > 0 {
+		dstIP = nt.t.dns[0].String()
+	}
 	addr, err := netip.ParseAddr(dstIP)
 	if err != nil {
 		log.Printf("  relayViaTunnel: bad addr %s: %v", dstIP, err)
@@ -1238,7 +1339,7 @@ func (b *Bridge) relayViaTunnel(nt *namedTunnel, local *gonet.TCPConn, dstIP str
 // pipes bytes both ways. This is the "not included" path.
 func (b *Bridge) relayDirect(local *gonet.TCPConn, dstAddr string, dstPort uint16, procName string, ancestors ...string) {
 	dstIP, _, _ := net.SplitHostPort(dstAddr)
-	connID := b.trackConn(procName, dstIP, "", local, ancestors...)
+	connID := b.trackConn(procName, dstIP, "", dstPort, local, ancestors...)
 	defer b.untrackConn(connID)
 	defer local.Close()
 	log.Printf("  relayDirect: dialing %s via iface %d", dstAddr, b.realIfaceIndex)

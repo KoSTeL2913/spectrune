@@ -91,7 +91,7 @@ func (s *Service) Connect(name string, _ *struct{}) error {
 	if app, other := s.bridge.appClaimedBy(cfg.Interface.IncludedApps, name); other != "" {
 		return fmt.Errorf("profile %q includes %s, which the connected profile %q already routes — an app can only go through one tunnel at a time", name, app, other)
 	}
-	if len(cfg.Interface.IncludedApps) == 0 {
+	if fullTunnelForSelection(len(cfg.Interface.IncludedApps), len(cfg.Interface.IncludedDomainLists)) {
 		for _, other := range s.bridge.TunnelNames() {
 			if s.bridge.tunnel(other).isFullTunnel() {
 				return fmt.Errorf("profile %q routes all traffic, and so does the connected profile %q — only one such profile can be connected at a time", name, other)
@@ -201,6 +201,11 @@ func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live := s.connectedLocked(cfg.Name)
+	if live && fullTunnelForSelection(len(cfg.Interface.IncludedApps), len(cfg.Interface.IncludedDomainLists)) {
+		if other := s.bridge.otherFullTunnel(cfg.Name); other != "" {
+			return fmt.Errorf("profile %q already routes all traffic; only one full tunnel can be connected", other)
+		}
+	}
 	if live {
 		if app, other := s.bridge.appClaimedBy(cfg.Interface.IncludedApps, cfg.Name); other != "" {
 			return fmt.Errorf("%s is already routed by the connected profile %q — an app can only go through one tunnel at a time", app, other)
@@ -217,7 +222,7 @@ func (s *Service) SaveProfile(cfg conf.Config, _ *struct{}) error {
 	// dropping every other in-flight connection with it) just to change
 	// which apps route through it.
 	if live {
-		s.bridge.UpdateTunnel(cfg.Name, cfg.Interface.IncludedApps, resolveDomainLists(cfg.Interface.IncludedDomainLists), len(cfg.Interface.IncludedDomainLists))
+		s.bridge.UpdateTunnel(cfg.Name, cfg.Interface.IncludedApps, resolveDomainLists(effectiveDomainLists(cfg.Name, cfg.Interface.IncludedDomainLists)), len(cfg.Interface.IncludedDomainLists))
 	}
 	return nil
 }
@@ -267,7 +272,10 @@ func (s *Service) DeleteProfile(name string, _ *struct{}) error {
 	if s.connectedLocked(name) {
 		return fmt.Errorf("profile %q is currently connected — disconnect first", name)
 	}
-	return deleteProfile(name)
+	if err := deleteProfile(name); err != nil {
+		return err
+	}
+	return changeDomainRouteReferences("", name, "")
 }
 
 // RenameProfileRequest bundles Service.RenameProfile's two arguments —
@@ -307,6 +315,10 @@ func (s *Service) RenameProfile(req RenameProfileRequest, _ *struct{}) error {
 	}
 	cfg.Name = req.NewName
 	if err := saveProfile(cfg); err != nil {
+		return err
+	}
+	if err := changeDomainRouteReferences("", req.OldName, req.NewName); err != nil {
+		deleteProfile(req.NewName)
 		return err
 	}
 	return deleteProfile(req.OldName)
@@ -360,28 +372,12 @@ func (s *Service) SaveDomainList(req DomainListSaveRequest, _ *struct{}) error {
 	if err := saveDomainList(req.Name, req.Domains); err != nil {
 		return err
 	}
-	// Live-update every connected profile that has this list enabled —
-	// otherwise editing a list's own domains while it's already toggled
-	// on for a connected profile wouldn't take effect until a reconnect.
+	return s.refreshDomainList(req.Name)
+}
+func (s *Service) refreshDomainList(listName string) error {
 	s.mu.Lock()
-	bridge := s.bridge
-	s.mu.Unlock()
-	if bridge == nil {
-		return nil
-	}
-	for _, name := range bridge.TunnelNames() {
-		cfg, err := loadProfile(name)
-		if err != nil {
-			continue
-		}
-		for _, enabled := range cfg.Interface.IncludedDomainLists {
-			if enabled == req.Name {
-				bridge.UpdateDomains(name, resolveDomainLists(cfg.Interface.IncludedDomainLists))
-				break
-			}
-		}
-	}
-	return nil
+	defer s.mu.Unlock()
+	return s.refreshDomainRoutesLocked()
 }
 
 func (s *Service) LoadDomainList(name string, reply *[]string) error {
@@ -394,7 +390,13 @@ func (s *Service) LoadDomainList(name string, reply *[]string) error {
 }
 
 func (s *Service) DeleteDomainList(name string, _ *struct{}) error {
-	return deleteDomainList(name)
+	if err := deleteDomainList(name); err != nil {
+		return err
+	}
+	if err := changeDomainRouteReferences(name, "", ""); err != nil {
+		return err
+	}
+	return s.refreshDomainList(name)
 }
 
 // winService adapts Service to svc.Handler for svc.Run.

@@ -32,10 +32,19 @@
 // not yet in the cgroup — this is what makes "just open the app
 // normally, no special launch step" work, mirroring the Windows
 // experience instead of requiring an explicit "Launch" click.
+//
+// It also moves processes back out: one whose app was taken off the list
+// (and everything it forked) goes back to the cgroup it came from on the
+// next scan, and Stop empties the cgroup before removing it. Before
+// v2.0.67.0 neither happened, and a cgroup can't be removed while it
+// still holds processes, so an app taken off the list (reported live
+// 2026-10-26: Firefox, removed at 14:46) kept going through the VPN
+// across disconnects and reconnects until it was restarted.
 package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -53,10 +62,17 @@ import (
 
 const (
 	tunName      = "spectrune0"
-	cgroupRoot   = "/sys/fs/cgroup/spectrune"
-	cgroupRelDir = "spectrune" // relative to the cgroup2 mount, for iptables --path
-	fwMark       = "0xca11"    // arbitrary; confirmed live 2026-09 that the real AmneziaWG kernel client already uses 0xca6c on this machine, so pick something else
-	routeTable   = "100"
+	cgroupMount  = "/sys/fs/cgroup"
+	cgroupRoot   = cgroupMount + "/spectrune"
+	cgroupRelDir = "spectrune"        // relative to the cgroup2 mount, for iptables --path
+	ownCgroup    = "/" + cgroupRelDir // as /proc/<pid>/cgroup shows it
+	// originsFile keeps the origin map across a daemon restart (an
+	// update): without it a system service moved in (AnyDesk's) could
+	// only be guessed back, and a guess lands it in the root cgroup,
+	// outside its systemd unit. /run goes at reboot, as does the cgroup.
+	originsFile = "/run/spectrune/cgroup-origins.json"
+	fwMark      = "0xca11" // arbitrary; confirmed live 2026-09 that the real AmneziaWG kernel client already uses 0xca6c on this machine, so pick something else
+	routeTable  = "100"
 
 	// bypassMark goes on the tunnel's own UDP socket so that in
 	// full-tunnel mode the encrypted packets skip table 100 instead of
@@ -71,15 +87,19 @@ const (
 // public shape (Start/Stop/HandshakeOK) as the netns-based version it
 // replaces, so service_linux.go didn't need to change.
 type LinuxBridge struct {
-	dev     *device.Device
-	sniffer *domainSniffer
+	profileName string
+	dev         *device.Device
+	sniffer     *domainSniffer
+	domainDNS   *domainDNSProxy
 
 	mu           sync.Mutex
 	includedApps []string // binary basenames/paths resolved from the profile's IncludedApps desktop IDs
 	stopMatch    chan struct{}
-	since        time.Time // when Start brought the tunnel up, for the GUI's connection timer
-	dns          []string  // the profile's DNS, applied in full-tunnel mode
-	full         bool      // full-tunnel rules currently applied
+	matchDone    chan struct{}  // closed when matchLoop has returned
+	origin       map[int]string // cgroup each moved process came from, to put it back
+	since        time.Time      // when Start brought the tunnel up, for the GUI's connection timer
+	dns          []string       // the profile's DNS, applied in full-tunnel mode
+	full         bool           // full-tunnel rules currently applied
 }
 
 func runCmd(name string, args ...string) error {
@@ -108,7 +128,14 @@ func teardownRouting() {
 	runCmdIgnoreErr("ip", "route", "flush", "table", routeTable)
 	runCmdIgnoreErr("ip", "link", "del", tunName)
 	runCmdIgnoreErr("ipset", "destroy", domainSetName)
-	os.RemoveAll(cgroupRoot)
+	// Anything still in the cgroup (a previous run that didn't stop
+	// cleanly) goes back where it belongs first: a cgroup that still has
+	// processes can't be removed, and they'd stay tunneled.
+	releaseAll(loadOrigins())
+	os.Remove(originsFile)
+	if err := os.Remove(cgroupRoot); err != nil && !os.IsNotExist(err) {
+		log.Printf("(non-fatal) remove %s: %v", cgroupRoot, err)
+	}
 }
 
 // Start brings the tunnel up: TUN + AmneziaWG device in the root
@@ -131,6 +158,7 @@ func teardownRouting() {
 // tunneled (verified: curl to a resolved hostname returns the VPN
 // server's IP). Same trade-off several similar split-tunnel tools make.
 func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
+	b.profileName = cfg.Name
 	uapiConf, err := cfg.ToUAPI()
 	if err != nil {
 		return fmt.Errorf("ToUAPI: %w", err)
@@ -221,12 +249,15 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	b.dns = cfg.DNS
 	b.includedApps = resolveAppBinaries(cfg.IncludedApps)
 	b.stopMatch = make(chan struct{})
-	stopCh := b.stopMatch
+	b.matchDone = make(chan struct{})
+	b.origin = make(map[int]string)
+	os.Remove(originsFile)
+	stopCh, doneCh := b.stopMatch, b.matchDone
 	b.mu.Unlock()
-	go b.matchLoop(stopCh)
+	go b.matchLoop(stopCh, doneCh)
 
 	sniffer := newDomainSniffer()
-	sniffer.setDomains(resolveDomainLists(cfg.IncludedDomainLists))
+	sniffer.setDomains(resolveDomainLists(effectiveDomainLists(cfg.Name, cfg.IncludedDomainLists)))
 	if err := sniffer.start(); err != nil {
 		log.Printf("domainSniffer.start: %v (domain-based routing unavailable this session)", err)
 	} else {
@@ -234,6 +265,18 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 	}
 
 	b.syncFullTunnel(fullTunnelForSelection(len(cfg.IncludedApps), len(cfg.IncludedDomainLists)))
+	proxy, err := startDomainDNSProxy(cfg.Address, cfg.DNS, sniffer.handleDNSPayload)
+	if err != nil {
+		b.Stop()
+		return fmt.Errorf("domain DNS proxy: %w", err)
+	}
+	b.domainDNS = proxy
+	if len(effectiveDomainLists(cfg.Name, cfg.IncludedDomainLists)) > 0 {
+		if err = proxy.setDomains(resolveDomainLists(effectiveDomainLists(cfg.Name, cfg.IncludedDomainLists))); err != nil {
+			b.Stop()
+			return err
+		}
+	}
 
 	b.since = time.Now()
 	log.Printf("Spectrune routing up (cgroup %s, fwmark %s), tunnel to %s", cgroupRoot, fwMark, cfg.Endpoint)
@@ -244,12 +287,26 @@ func (b *LinuxBridge) Start(cfg *LinuxConfig) error {
 // safe to call twice.
 func (b *LinuxBridge) Stop() {
 	b.mu.Lock()
+	done := b.matchDone
 	if b.stopMatch != nil {
 		close(b.stopMatch)
 		b.stopMatch = nil
 	}
 	b.mu.Unlock()
+	if done != nil {
+		<-done // so it can't move another process in after the release below
+	}
+	b.mu.Lock()
+	releaseAll(b.origin)
+	b.origin = nil
+	os.Remove(originsFile)
+	b.matchDone = nil
+	b.mu.Unlock()
 
+	if b.domainDNS != nil {
+		b.domainDNS.close()
+		b.domainDNS = nil
+	}
 	if b.sniffer != nil {
 		b.sniffer.close()
 		b.sniffer = nil
@@ -267,8 +324,8 @@ func (b *LinuxBridge) UpdateSelection(apps, domainLists []string) {
 	b.mu.Lock()
 	b.includedApps = resolveAppBinaries(apps)
 	b.mu.Unlock()
-	b.UpdateIncludedDomainLists(domainLists)
 	b.syncFullTunnel(fullTunnelForSelection(len(apps), len(domainLists)))
+	b.UpdateIncludedDomainLists(domainLists)
 }
 
 // syncFullTunnel applies or removes the full-tunnel rules to match the
@@ -369,7 +426,12 @@ func runCmdQuiet(name string, args ...string) {
 // a reconnect — same reasoning as UpdateIncludedApps.
 func (b *LinuxBridge) UpdateIncludedDomainLists(listNames []string) {
 	if b.sniffer != nil {
-		b.sniffer.setDomains(resolveDomainLists(listNames))
+		b.sniffer.setDomains(resolveDomainLists(effectiveDomainLists(b.profileName, listNames)))
+		if b.domainDNS != nil && !b.full {
+			if err := b.domainDNS.setDomains(resolveDomainLists(effectiveDomainLists(b.profileName, listNames))); err != nil {
+				log.Printf("domain DNS: %v", err)
+			}
+		}
 	}
 }
 
@@ -377,29 +439,37 @@ func (b *LinuxBridge) UpdateIncludedDomainLists(listNames []string) {
 // match the current app selection and haven't been moved into the
 // cgroup yet. This is what makes opening an included app *normally*
 // (double-clicking its usual icon, or it was already running before
-// Connect) work without any special launch step.
-func (b *LinuxBridge) matchLoop(stop <-chan struct{}) {
+// Connect) work without any special launch step. The same pass moves out
+// whatever no longer belongs: see releaseStale.
+func (b *LinuxBridge) matchLoop(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
 	ticker := time.NewTicker(matchInterval)
 	defer ticker.Stop()
-	already := make(map[int]bool)
 	for {
 		b.mu.Lock()
 		targets := append([]string(nil), b.includedApps...)
 		b.mu.Unlock()
+		want := make(map[int]bool)
 		if len(targets) > 0 {
 			for _, pid := range matchingPIDs(targets) {
-				if already[pid] {
-					continue
+				want[pid] = true
+				from := cgroupOf(pid)
+				if from == "" || from == ownCgroup {
+					continue // gone, or already in
 				}
 				if err := addPIDToCgroup(pid); err != nil {
 					// Common and harmless: the process exited between
 					// being listed and us trying to move it.
 					continue
 				}
-				already[pid] = true
+				b.mu.Lock()
+				b.origin[pid] = from
+				saveOrigins(b.origin)
+				b.mu.Unlock()
 				log.Printf("Spectrune: included pid %d into the tunnel", pid)
 			}
 		}
+		b.releaseStale(want)
 		select {
 		case <-stop:
 			return
@@ -408,8 +478,162 @@ func (b *LinuxBridge) matchLoop(stop <-chan struct{}) {
 	}
 }
 
+// releaseStale moves out of the cgroup every process that is neither a
+// match for the current selection nor started (at any depth) by one: an
+// app taken off the list, and children left behind by an included app
+// that has exited. Children of included apps stay, as cgroup inheritance
+// put them there on purpose (a browser's tab processes).
+func (b *LinuxBridge) releaseStale(want map[int]bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	in := make(map[int]bool)
+	changed := false
+	for _, pid := range cgroupPIDs() {
+		if descendsFrom(pid, want) {
+			in[pid] = true
+		} else {
+			releasePID(pid, b.origin)
+		}
+	}
+	for pid := range b.origin {
+		if !in[pid] {
+			delete(b.origin, pid) // exited or released: the PID may be reused
+			changed = true
+		}
+	}
+	if changed {
+		saveOrigins(b.origin)
+	}
+}
+
+func saveOrigins(origin map[int]string) {
+	if data, err := json.Marshal(origin); err == nil {
+		os.WriteFile(originsFile, data, 0o600)
+	}
+}
+
+// loadOrigins reads what a previous run of the daemon left (nil if none).
+func loadOrigins() map[int]string {
+	data, err := os.ReadFile(originsFile)
+	if err != nil {
+		return nil
+	}
+	var origin map[int]string
+	if json.Unmarshal(data, &origin) != nil {
+		return nil
+	}
+	return origin
+}
+
 func addPIDToCgroup(pid int) error {
 	return os.WriteFile(filepath.Join(cgroupRoot, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644)
+}
+
+// cgroupPIDs lists the processes currently in our cgroup.
+func cgroupPIDs() []int {
+	data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.procs"))
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, f := range strings.Fields(string(data)) {
+		if pid, err := strconv.Atoi(f); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// cgroupOf returns pid's cgroup v2 path as /proc shows it
+// ("/user.slice/user-1000.slice/session-c1.scope"), "" if it's gone.
+func cgroupOf(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if p, ok := strings.CutPrefix(line, "0::"); ok {
+			return p
+		}
+	}
+	return ""
+}
+
+// parentPID reads pid's parent from /proc/<pid>/stat (0 if it's gone).
+// The fields are counted from the last ')', as the command name in
+// parentheses before it may itself hold spaces and parentheses.
+func parentPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	s := string(data)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(s[i+1:])
+	if len(f) < 2 {
+		return 0
+	}
+	ppid, _ := strconv.Atoi(f[1])
+	return ppid
+}
+
+// descendsFrom reports whether pid or one of its ancestors is in set.
+func descendsFrom(pid int, set map[int]bool) bool {
+	for p, n := pid, 0; p > 1 && n < 64; p, n = parentPID(p), n+1 {
+		if set[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// homeCgroup is where a process leaving our cgroup goes: the cgroup it
+// (or the nearest ancestor we moved in) was in before, or, if we never
+// recorded one (left over from a previous run), that of its nearest
+// ancestor outside our cgroup — for an app started from the desktop
+// that is the very cgroup it was started in.
+func homeCgroup(pid int, origin map[int]string) string {
+	for p, n := pid, 0; p > 1 && n < 64; p, n = parentPID(p), n+1 {
+		if o, ok := origin[p]; ok {
+			return o
+		}
+		if p != pid {
+			if cg := cgroupOf(p); cg != "" && cg != ownCgroup {
+				return cg
+			}
+		}
+	}
+	return "/"
+}
+
+// releasePID moves pid back to its home cgroup — or, if that one is gone
+// or won't take it (a cgroup with sub-cgroups holds no processes of its
+// own), the nearest parent that will, up to the root.
+func releasePID(pid int, origin map[int]string) {
+	data := []byte(strconv.Itoa(pid))
+	for dir := homeCgroup(pid, origin); ; dir = filepath.Dir(dir) {
+		err := os.WriteFile(filepath.Join(cgroupMount, dir, "cgroup.procs"), data, 0o644)
+		if err == nil {
+			log.Printf("Spectrune: released pid %d from the tunnel (back to %s)", pid, dir)
+			return
+		}
+		if dir == "/" || dir == "." {
+			if cgroupOf(pid) != "" {
+				log.Printf("(non-fatal) release pid %d: %v", pid, err)
+			}
+			return
+		}
+	}
+}
+
+// releaseAll empties our cgroup (origin may be nil).
+func releaseAll(origin map[int]string) {
+	for _, pid := range cgroupPIDs() {
+		releasePID(pid, origin)
+	}
 }
 
 // HandshakeOK reports whether the WireGuard/AmneziaWG handshake with the

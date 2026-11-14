@@ -2,5 +2,5 @@
 
 package main
 
-// Linux-only release; Windows retains its existing version.
-const appVersion = "2.0.70.0"
+// Keep the Linux and Windows package versions in sync for shared releases.
+const appVersion = "2.0.71.0"

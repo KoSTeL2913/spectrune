@@ -396,11 +396,14 @@ func bindAPI(w webview.WebView) {
 		defer client.Close()
 		req := LaunchAppRequest{
 			DesktopID: desktopID,
+			CallerPID: os.Getpid(),
 			Env: map[string]string{
 				"DISPLAY":                  os.Getenv("DISPLAY"),
 				"WAYLAND_DISPLAY":          os.Getenv("WAYLAND_DISPLAY"),
 				"XDG_RUNTIME_DIR":          os.Getenv("XDG_RUNTIME_DIR"),
 				"DBUS_SESSION_BUS_ADDRESS": os.Getenv("DBUS_SESSION_BUS_ADDRESS"),
+				"LANG":                     os.Getenv("LANG"),
+				"XAUTHORITY":               os.Getenv("XAUTHORITY"),
 				"_CALLER_UID":              fmt.Sprint(os.Getuid()),
 				"_CALLER_GID":              fmt.Sprint(os.Getgid()),
 			},
@@ -484,6 +487,24 @@ func bindAPI(w webview.WebView) {
 		return client.Call("Bridge.DeleteAppPreset", name, &struct{}{})
 	}))
 
+	must(w.Bind("getDomainRoutes", func() (map[string]string, error) {
+		client, err := ipcDial()
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		var routes map[string]string
+		err = client.Call("Bridge.GetDomainRoutes", struct{}{}, &routes)
+		return routes, err
+	}))
+	must(w.Bind("setDomainRoute", func(list, profile string) error {
+		client, err := ipcDial()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		return client.Call("Bridge.SetDomainRoute", DomainRouteRequest{List: list, Profile: profile}, &struct{}{})
+	}))
 	must(w.Bind("listDomainLists", func() ([]string, error) {
 		client, err := ipcDial()
 		if err != nil {
