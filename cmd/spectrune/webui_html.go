@@ -161,11 +161,7 @@ const webUIHTML = `<!DOCTYPE html>
             mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
   }
   .hero.on .orb { box-shadow: 0 0 46px -6px color-mix(in srgb, var(--accent) 70%, transparent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
-  .hero.on .orb-ring { opacity: 1; }
-  /* Swirling dust around the logo — drawn by the orb-dust script. */
-  .orb-dust { position: absolute; left: 50%; top: 50%; width: 200px; height: 200px; transform: translate(-50%, -50%); pointer-events: none; }
-  /* Spins only while connecting — a constantly spinning ring cost as much
-     as all the dust; the dust alone keeps the logo alive. */
+  .hero.on .orb-ring { opacity: 1; animation: orb-spin 6s linear infinite; }
   .hero.connecting .orb-ring { opacity: .9; animation: orb-spin 1.1s linear infinite; }
   @keyframes orb-spin { to { transform: rotate(360deg); } }
   .brand-icon { width: 46px; height: 46px; position: relative; }
@@ -235,7 +231,6 @@ const webUIHTML = `<!DOCTYPE html>
     .hero { padding: 14px 16px 14px 20px; margin-bottom: 12px; }
     .hero-main { gap: 20px; }
     .orb { width: 58px; height: 58px; }
-    .orb-dust { width: 150px; height: 150px; }
   }
 
   /* ---------- profile cards ---------- */
@@ -568,7 +563,7 @@ const webUIHTML = `<!DOCTYPE html>
   body.stars-on .profile-row.is-on { background: color-mix(in srgb, var(--accent) 22%, color-mix(in srgb, var(--surface) 84%, transparent)); }
   /* Only the endless animations — pausing the one-shot entrance ones
      would freeze them on their first, invisible frame. */
-  body.paused .orb-ring, body.paused .status-text::before,
+  body.paused .hero .orb-ring, body.paused .status-text::before,
   body.paused .tunnel-head::before, body.paused .profile-row-connect-btn::after { animation-play-state: paused; }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -725,7 +720,6 @@ const webUIHTML = `<!DOCTYPE html>
   <div class="hero panel" id="hero">
     <div class="hero-main">
       <div class="orb" id="hero-orb">
-        <canvas class="orb-dust" id="orb-dust"></canvas>
         <span class="orb-ring"></span>
         <span class="brand-icon">
           <svg id="brand-icon-active" viewBox="0 0 256 256" style="opacity:0"><use href="#s-rune" fill="url(#runeGrad)"/><use href="#s-rune-shine"/></svg>
@@ -1216,7 +1210,6 @@ function setAnimationsPaused() {
   var off = !state.theme.anim || reducedMotion || !windowFocused;
   document.body.classList.toggle('paused', hidden || off);
   var mode = hidden ? 'stop' : off ? 'still' : 'run';
-  orbDust.setMode(mode);
   starfield.setMode(mode);
 }
 window.setWindowVisible = function(visible) { windowHidden = !visible; setAnimationsPaused(); };
@@ -1224,11 +1217,10 @@ document.addEventListener('visibilitychange', setAnimationsPaused);
 window.addEventListener('focus', function() { windowFocused = true; setAnimationsPaused(); });
 window.addEventListener('blur', function() { windowFocused = false; setAnimationsPaused(); });
 
-// celebrateConnect plays when a tunnel's handshake completes: the logo's
-// dust bursts outward, the stars jump to warp, and the hero flashes.
+// celebrateConnect plays when a tunnel's handshake completes:
+// the stars jump to warp and the hero flashes.
 function celebrateConnect() {
   if (document.body.classList.contains('paused')) return; // animations off or window hidden
-  orbDust.burst();
   starfield.warp();
   var hero = $('hero');
   hero.classList.remove('flash');
@@ -1463,7 +1455,6 @@ function updateButtons() {
   }
   $('hero').classList.toggle('on', up.length > 0);
   $('hero').classList.toggle('connecting', up.length === 0 && pending.length > 0);
-  orbDust.refresh();
   $('hero-orb').classList.toggle('busy', state.connectBusy);
   $('hero-orb').title = state.activeOrder.length > 0 ? t('orbDisconnect') :
     (state.selected ? tf('orbConnect', state.selected) : '');
@@ -2511,17 +2502,7 @@ var THEMES = {
   slate:   { c1: '#8a8fa3', c2: '#545a70' },
 };
 
-// ---------- orb dust ----------
-// Glowing particles orbiting the hero logo, with short fading trails.
-// Their speed and brightness follow the hero's state: bright and calm
-// when connected, fast while connecting, a faint slow grey drift when
-// off. Easing between states (cur -> target) keeps a change smooth.
-// animTicker drives the canvas animations from one ~24 fps timer, so the
-// dust and the starfield redraw together and the page is re-composited
-// once per tick rather than once for each. Each handler returns whether
-// it still wants ticks; with none left the timer stops entirely (nothing
-// moving, nothing hidden still running at 60 Hz). Handlers also get the
-// tick's number, so ones that skip ticks can skip the same ones.
+// Shared timer for the starfield. Stop ticking when no handler needs frames.
 var ANIM_SLOT_MS = 42;
 var animTicker = (function() {
   var handlers = [], timer = null, n = 0;
@@ -2537,108 +2518,6 @@ var animTicker = (function() {
   };
 })();
 
-var orbDust = (function() {
-  var canvas = $('orb-dust');
-  var ctx = canvas.getContext('2d');
-  var SIZE = 200, R_MIN = 41, R_MAX = 66;
-  var burst = 0; // 1 right after a connect, easing back to 0
-  var mode = 'run'; // see setMode
-  var dpr = 1, colors = [[139, 61, 255], [255, 45, 85]];
-  var cur = { speed: .25, glow: .35, tint: 0 };
-  var parts = [];
-  for (var i = 0; i < 54; i++) {
-    parts.push({
-      a: Math.random() * Math.PI * 2,
-      r: R_MIN + Math.pow(Math.random(), 1.6) * (R_MAX - R_MIN),
-      v: .006 + Math.random() * .012,         // radians per frame at speed 1
-      wob: Math.random() * Math.PI * 2,       // phase of the in/out drift
-      size: .5 + Math.random() * 1.7,
-      tw: Math.random() * Math.PI * 2,        // twinkle phase
-      mix: Math.random(),                     // where on the c1 -> c2 gradient
-    });
-  }
-  function hexToRgb(h) {
-    var m = /^#?([0-9a-f]{6})$/i.exec(h || '');
-    if (!m) return [139, 61, 255];
-    var n = parseInt(m[1], 16);
-    return [n >> 16 & 255, n >> 8 & 255, n & 255];
-  }
-  function resize() {
-    dpr = window.devicePixelRatio || 1;
-    canvas.width = SIZE * dpr;
-    canvas.height = SIZE * dpr;
-  }
-  // One step per animTicker tick (the per-step amounts below are sized
-  // for its ~24 fps).
-  // Every other tick (~12 fps, each step moving twice as far) while
-  // nothing is happening; every tick while connecting or bursting, when the
-  // dust moves fast enough to need it. Frames are what cost (each one
-  // recomposites the window), so halving them roughly halves the load.
-  animTicker.add(function(now, n) {
-    if (mode !== 'run') return false;
-    var fast = burst > .01 || $('hero').classList.contains('connecting');
-    if (fast) step(false, 1);
-    else if (n % 2 === 0) step(false, 2);
-    return true;
-  });
-  // drawStill paints the dust unmoving, in the current state's colors —
-  // a few steps so it shows at full strength.
-  function drawStill() {
-    for (var k = 0; k < 6; k++) step(true, 1);
-  }
-  // n is how many ~24 fps frames this step stands for.
-  function step(frozen, n) {
-    var hero = $('hero');
-    var target = hero.classList.contains('on') ? { speed: 1, glow: 1, tint: 1 }
-      : hero.classList.contains('connecting') ? { speed: 3, glow: .8, tint: 1 }
-      : { speed: .22, glow: .28, tint: 0 };
-    ['speed', 'glow', 'tint'].forEach(function(k) { cur[k] = frozen ? target[k] : cur[k] + (target[k] - cur[k]) * (1 - Math.pow(.9, n)); });
-    burst *= Math.pow(.885, n);
-    if (canvas.width !== Math.round(SIZE * (window.devicePixelRatio || 1))) resize();
-    var light = document.documentElement.classList.contains('light');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // Fade the previous frame instead of clearing it — that's the trail.
-    ctx.globalCompositeOperation = 'destination-out';
-    var fade = .36 + .18 * (1 - cur.speed / 3);
-    ctx.fillStyle = 'rgba(0,0,0,' + (1 - Math.pow(1 - fade, n)) + ')';
-    ctx.fillRect(0, 0, SIZE, SIZE);
-    ctx.globalCompositeOperation = light ? 'source-over' : 'lighter';
-    var c = SIZE / 2, t = Date.now() / 1000;
-    parts.forEach(function(p) {
-      if (!frozen) p.a += p.v * 2.5 * n * (cur.speed + burst * 7);
-      var r = p.r + Math.sin(t * .8 + p.wob) * 2.5 + burst * (18 + p.size * 16);
-      var x = c + Math.cos(p.a) * r, y = c + Math.sin(p.a) * r;
-      // Dimmer toward the outer edge so the cloud has no hard rim.
-      var edge = 1 - Math.max(0, (r - R_MIN) / (R_MAX - R_MIN + 4));
-      if (burst > .01) edge = Math.max(edge, Math.min(1, 1 - (r - R_MAX) / 50));
-      var a = Math.min(1, (cur.glow + burst * .8) * Math.max(0, edge) * (.45 + .55 * Math.abs(Math.sin(t * 1.7 + p.tw))));
-      var col = [0, 1, 2].map(function(k) {
-        var accent = colors[0][k] + (colors[1][k] - colors[0][k]) * p.mix;
-        var grey = light ? 120 : 170;
-        return Math.round(grey + (accent - grey) * cur.tint);
-      });
-      ctx.fillStyle = 'rgba(' + col.join(',') + ',' + a.toFixed(3) + ')';
-      ctx.beginPath();
-      ctx.arc(x, y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  }
-  resize();
-  animTicker.wake();
-  return {
-    setColors: function(c1, c2) { colors = [hexToRgb(c1), hexToRgb(c2)]; },
-    burst: function() { burst = 1; },
-    // setMode: 'run' animates, 'still' shows the dust frozen (animations
-    // off in Settings), 'stop' draws nothing new (window hidden).
-    setMode: function(m) {
-      mode = m;
-      if (m === 'run') animTicker.wake();
-      else if (m === 'still') drawStill();
-    },
-    // refresh redraws the still dust after the connection state changed.
-    refresh: function() { if (mode === 'still') drawStill(); },
-  };
-})();
 
 function applyTheme() {
   var root = document.documentElement;
@@ -2663,7 +2542,6 @@ function applyTheme() {
   // match the app's accent instead of leaving it whatever stock color
   // Windows uses.
   if (window.setTitleBarColor) window.setTitleBarColor(c1);
-  orbDust.setColors(c1, c2);
   starfield.setAccent(c1);
 }
 
@@ -2757,13 +2635,7 @@ var starfield = (function() {
         tw: Math.random() * Math.PI * 2, tws: .8 + Math.random() * 2, c: starColor() });
     }
   }
-  // On the same ticks as the idle dust (~12 fps): every frame
-  // recomposites the whole window, on the CPU and the GPU alike, so the
-  // stars ride frames the dust makes anyway instead of adding their own.
-  // At a few px/s that is about a pixel a frame, which the un-rounded,
-  // sub-pixel blit shows as a smooth drift (6 fps and whole pixels were
-  // visibly jerky). Every tick while a warp or shooting star is moving
-  // fast.
+  // Draw at ~12 fps, or ~24 fps during a warp or shooting star.
   animTicker.add(function(now, n) {
     if (!enabled || mode !== 'run') return false;
     if (!(warpV > .02 || shooting) && n % 2) return true;
@@ -2863,7 +2735,7 @@ var starfield = (function() {
       if (!nextShot) nextShot = performance.now() + 3000;
       kick();
     },
-    setMode: function(m) { mode = m; kick(); }, // same modes as orbDust.setMode
+    setMode: function(m) { mode = m; kick(); }, // run, still, or stop
   };
 })();
 
